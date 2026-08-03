@@ -9,7 +9,11 @@ description = "A document assistant that answers only from your documents, cites
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "OJ Florendo" }]
-requires-python = ">=3.11"
+# 3.12 rather than 3.11: numpy's bundled type stubs use `type` statement syntax
+# that only parses on 3.12+, so mypy cannot check this project against 3.11.
+# Claiming support for a version the type checker can't verify would be a
+# guess, and the deployment target is ours to choose anyway.
+requires-python = ">=3.12"
 
 # Pinned to major versions rather than exact ones: this is an application, but a
 # public one that reviewers may install months from now, so it should still
@@ -42,13 +46,13 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 # fastembed ships no type stubs; everything we write stays strictly typed.
 [[tool.mypy.overrides]]

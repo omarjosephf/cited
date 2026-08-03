@@ -13,7 +13,7 @@ from pathlib import Path
 import docx
 import pytest
 
-from assistant.documents import read_corpus, read_document
+from assistant.documents import is_corpus_document, read_corpus, read_document
 
 
 def make_docx(path: Path) -> Path:
@@ -138,6 +138,43 @@ def test_mixed_corpus_reads_every_supported_format(tmp_path: Path) -> None:
 
     assert sources == {"a.md", "b.docx", "c.pdf"}
     assert "skip.rtf" not in sources
+
+
+def test_corpus_excludes_its_own_readme(tmp_path: Path) -> None:
+    """A README explaining the corpus must not become searchable content.
+
+    It is a supported format sitting in the corpus directory, so without an
+    explicit rule the assistant starts citing the folder's own documentation as
+    though it were a source document.
+    """
+    (tmp_path / "README.md").write_text(
+        "# Corpus\n\nDrop documents in this folder.\n", encoding="utf-8"
+    )
+    (tmp_path / "real.md").write_text("# Topic\n\nActual content.\n", encoding="utf-8")
+
+    sources = {p.source for p in read_corpus(tmp_path)}
+
+    assert sources == {"real.md"}
+
+
+@pytest.mark.parametrize("name", ["readme.md", "README.MD", "ReadMe.txt"])
+def test_readme_exclusion_is_case_insensitive(tmp_path: Path, name: str) -> None:
+    (tmp_path / name).write_text("# R\n\nNotes about the corpus.\n", encoding="utf-8")
+    assert read_corpus(tmp_path) == []
+
+
+@pytest.mark.parametrize("name", ["_draft.md", ".hidden.md", "_notes.txt"])
+def test_underscore_and_dot_prefixed_files_are_not_content(
+    tmp_path: Path, name: str
+) -> None:
+    """Both are long-standing conventions for 'supporting file, not content'."""
+    (tmp_path / name).write_text("# D\n\nWork in progress.\n", encoding="utf-8")
+    assert read_corpus(tmp_path) == []
+
+
+def test_is_corpus_document_rejects_directories(tmp_path: Path) -> None:
+    (tmp_path / "subfolder.md").mkdir()
+    assert not is_corpus_document(tmp_path / "subfolder.md")
 
 
 def test_corpus_order_is_deterministic(tmp_path: Path) -> None:

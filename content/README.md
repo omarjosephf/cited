@@ -1,7 +1,43 @@
 # Corpus
 
-The documents the assistant answers from. Drop `.pdf`, `.docx` or `.md` files
-here and run the ingest command.
+The documents the assistant answers from. Drop `.pdf`, `.docx`, `.txt` or `.md`
+files here and run the ingest command.
+
+This is **test data, not the project**. The system runs against any folder of
+documents; what happens to be in here shapes the demo, not the architecture.
+
+## What is in here
+
+| Document | Subject |
+| --- | --- |
+| `prompt-engineering-fundamentals.md` | Practical prompt engineering for non-specialists |
+
+### Provenance
+
+`prompt-engineering-fundamentals.md` was drafted with AI assistance and then
+reviewed line by line for factual accuracy by the author, who holds a
+prompt-engineering certification from the Dubai Future Foundation and has
+delivered AI and Python training professionally.
+
+That review is not a formality. This project's entire claim is that an answer can
+be traced to its source — so a corpus of unverified text would make every
+citation technically correct and practically worthless, with the system
+faithfully quoting a claim nobody ever checked. Every factual assertion here has
+been confirmed by a human who is accountable for it.
+
+## Why the corpus is small on purpose
+
+It needs to be large enough that retrieval has to genuinely discriminate between
+passages, and small enough that a reader can verify any answer against the source
+in under a minute. A few thousand words meets both. Scaling to a larger corpus is
+a capacity question rather than a correctness one, and it is answered by the
+evaluation results, not by piling more documents in here.
+
+## Structure matters more than length
+
+Markdown headings and Word heading styles become the section names in citations,
+so a well-headed document produces citations a reader can actually navigate to.
+An unstructured wall of text retrieves worse and cites worse.
 
 ## What belongs here
 

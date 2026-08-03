@@ -95,6 +95,55 @@ def test_chunks_never_span_two_pages() -> None:
     assert [c.page for c in chunks] == [1, 2]
 
 
+def test_chunks_never_span_two_sections() -> None:
+    """The citation-accuracy guard.
+
+    A chunk takes the section of its first passage. If it were allowed to run
+    past a heading it would be cited under the section it started in while
+    containing text from the next — a confidently, specifically wrong citation.
+    A reader who follows it lands in the wrong part of the document, which is
+    worse than no citation at all.
+    """
+    passages = [
+        Passage("Text under the first heading.", "doc.md", section="First"),
+        Passage("Text under the second heading.", "doc.md", section="Second"),
+    ]
+    chunks = chunk_passages(passages)
+
+    assert [c.section for c in chunks] == ["First", "Second"]
+    first = next(c for c in chunks if c.section == "First")
+    assert "second heading" not in first.text
+
+
+def test_every_section_in_a_document_survives_into_a_citation() -> None:
+    """No heading may be swallowed by the chunk that preceded it."""
+    sections = [f"Section {i}" for i in range(6)]
+    passages = [
+        Passage(f"Body text for section {i}. " * 3, "doc.md", section=name)
+        for i, name in enumerate(sections)
+    ]
+    chunks = chunk_passages(passages)
+
+    assert [c.section for c in chunks] == sections
+
+
+def test_overlap_does_not_leak_across_a_section_boundary() -> None:
+    """Size-driven splits overlap; provenance-driven splits must not.
+
+    Carrying a tail across a heading would attribute one section's words to
+    another section's citation — the same misattribution the boundary exists to
+    prevent, reintroduced through the overlap mechanism.
+    """
+    passages = [
+        Passage("alpha " * 60, "doc.md", section="First"),
+        Passage("beta " * 60, "doc.md", section="Second"),
+    ]
+    chunks = chunk_passages(passages)
+
+    second = next(c for c in chunks if c.section == "Second")
+    assert "alpha" not in second.text
+
+
 def test_neighbouring_chunks_overlap_so_a_split_answer_survives() -> None:
     # Enough passages to force more than one chunk.
     passages = [Passage(f"word{i} " * 30, "doc.md") for i in range(12)]

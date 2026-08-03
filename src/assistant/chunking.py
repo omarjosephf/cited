@@ -87,21 +87,42 @@ def _split_oversized(passage: Passage) -> list[Passage]:
     return pieces
 
 
-def chunk_passages(passages: list[Passage]) -> list[Chunk]:
-    """Merge passages into chunks, never merging across documents or pages.
+def _provenance_differs(left: Passage, right: Passage) -> bool:
+    """Whether two passages cannot honestly share one citation.
 
-    A chunk that spanned two documents could not be cited honestly, and one that
-    spanned two pages would have to claim a single page number. Both boundaries
-    are therefore hard: provenance constrains chunking, not the other way round.
+    Document and page are the obvious cases. **Section is included for the same
+    reason**, and it is the subtle one: a chunk takes the section of its first
+    passage, so a chunk allowed to run past a heading gets cited under the
+    heading it started in while containing text from the next. The citation is
+    then confidently, specifically wrong — which is worse than no citation at
+    all, because a reader who follows it finds the wrong part of the document
+    and concludes the tool is untrustworthy.
+
+    The cost is that a short section becomes a short chunk. That is an
+    acceptable trade: a short section is still a complete idea and retrieves
+    perfectly well, whereas a misattributed citation defeats the point of the
+    project.
+    """
+    return (
+        left.source != right.source
+        or left.page != right.page
+        or left.section != right.section
+    )
+
+
+def chunk_passages(passages: list[Passage]) -> list[Chunk]:
+    """Merge passages into chunks that can each be cited by a single reference.
+
+    Provenance constrains chunking, never the other way round: a chunk is only
+    allowed to grow while every passage in it shares one citation.
     """
     chunks: list[Chunk] = []
     buffer: list[Passage] = []
     buffer_words = 0
 
-    def flush() -> None:
+    def emit() -> None:
+        """Turn the buffer into a chunk. Does not carry any overlap forward."""
         nonlocal buffer_words
-        if not buffer:
-            return
         head = buffer[0]
         chunks.append(
             Chunk(
@@ -112,56 +133,43 @@ def chunk_passages(passages: list[Passage]) -> list[Chunk]:
                 index=len(chunks),
             )
         )
-        # Carry the tail forward so the next chunk overlaps this one.
-        tail_words: list[str] = []
-        carried: list[Passage] = []
-        for passage in reversed(buffer):
-            words = passage.text.split()
-            if len(tail_words) + len(words) > OVERLAP_WORDS:
-                break
-            tail_words = words + tail_words
-            carried.insert(0, passage)
         buffer.clear()
-        buffer.extend(carried)
-        buffer_words = len(tail_words)
+        buffer_words = 0
+
+    def emit_with_overlap() -> None:
+        """Emit, then seed the next chunk with this one's tail.
+
+        Overlap only happens when the split was driven by *size*. A split driven
+        by provenance must not carry text across, or the overlap would be
+        attributed to the wrong document, page or section.
+        """
+        nonlocal buffer_words
+        tail: list[Passage] = []
+        tail_words = 0
+        for passage in reversed(buffer):
+            words = len(passage.text.split())
+            if tail_words + words > OVERLAP_WORDS:
+                break
+            tail.insert(0, passage)
+            tail_words += words
+
+        emit()
+        buffer.extend(tail)
+        buffer_words = tail_words
 
     for original in passages:
         for passage in _split_oversized(original):
-            boundary = buffer and (
-                passage.source != buffer[-1].source or passage.page != buffer[-1].page
-            )
-            if boundary:
-                # Flush without overlap: the carried tail belongs to a different
-                # document or page and must not leak into the next chunk.
-                head = buffer[0]
-                chunks.append(
-                    Chunk(
-                        text=" ".join(p.text for p in buffer),
-                        source=head.source,
-                        page=head.page,
-                        section=head.section,
-                        index=len(chunks),
-                    )
-                )
-                buffer.clear()
-                buffer_words = 0
+            if buffer and _provenance_differs(passage, buffer[-1]):
+                emit()
 
             words = len(passage.text.split())
             if buffer_words + words > TARGET_WORDS and buffer_words >= MIN_WORDS:
-                flush()
+                emit_with_overlap()
+
             buffer.append(passage)
             buffer_words += words
 
     if buffer:
-        head = buffer[0]
-        chunks.append(
-            Chunk(
-                text=" ".join(p.text for p in buffer),
-                source=head.source,
-                page=head.page,
-                section=head.section,
-                index=len(chunks),
-            )
-        )
+        emit()
 
     return chunks

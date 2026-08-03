@@ -181,15 +181,33 @@ def read_document(path: Path) -> list[Passage]:
     return reader.read(path)
 
 
-def read_corpus(directory: Path) -> list[Passage]:
-    """Read every supported document in a directory, sorted for reproducibility.
+def is_corpus_document(path: Path) -> bool:
+    """Whether a file is corpus content rather than a note *about* the corpus.
 
-    Unsupported files are skipped rather than fatal — a corpus folder will
+    A `README.md` explaining what a corpus directory is for is itself a
+    supported format, so without this it becomes searchable content — and the
+    assistant starts citing the folder's own documentation as though it were a
+    source. Files beginning with `_` or `.` are excluded on the same principle:
+    both are long-standing conventions for "supporting file, not content".
+    """
+    if not path.is_file():
+        return False
+    if path.suffix.lower() not in SUPPORTED_SUFFIXES:
+        return False
+    if path.stem.lower() == "readme":
+        return False
+    return not path.name.startswith((".", "_"))
+
+
+def read_corpus(directory: Path) -> list[Passage]:
+    """Read every corpus document in a directory, sorted for reproducibility.
+
+    Non-content files are skipped rather than fatal — a corpus folder will
     accumulate a README, a stray image, an editor backup — but a *supported*
-    file that fails to parse is a real problem and is allowed to raise.
+    content file that fails to parse is a real problem and is allowed to raise.
     """
     passages: list[Passage] = []
     for path in sorted(directory.iterdir()):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
+        if is_corpus_document(path):
             passages.extend(read_document(path))
     return passages

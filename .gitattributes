@@ -1,0 +1,16 @@
+# Normalise line endings. Authored on Windows, but the repository is public and
+# the container it deploys to is Linux — without this, every file round-trips
+# between CRLF and LF and diffs fill with noise.
+* text=auto eol=lf
+
+# The licence is a verbatim legal document fetched from gnu.org. Leave its bytes
+# alone so it stays diffable against the canonical text.
+LICENSE -text
+
+# Binary assets: never try to normalise these.
+*.pdf binary
+*.docx binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.onnx binary

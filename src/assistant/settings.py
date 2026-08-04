@@ -34,23 +34,32 @@ class Settings(BaseSettings):
         ),
     )
 
-    answer_model: str = "claude-opus-5"
+    answer_model: str = "claude-haiku-4-5"
     """The model that reads retrieved passages and decides whether they answer.
 
-    Configurable because it is the only paid component, and the right choice
-    depends on whether this is running as a personal demo or in front of real
-    traffic. Cost per million tokens at time of writing: Opus 5 $5/$25,
-    Sonnet 5 $3/$15, Haiku 4.5 $1/$5.
+    Haiku by default. The task is reading four short passages and judging
+    whether they contain an answer — comprehension, not reasoning — and the
+    cheapest capable model is the right default for something served publicly.
+
+    Cost per 1,000 questions at roughly 1,200 input / 200 output tokens:
+    Opus 5 $11.00, Sonnet 5 $6.60, Haiku 4.5 $2.20. Whether Haiku actually
+    costs accuracy is a question for the evaluation harness, not for intuition.
     """
 
     answer_max_tokens: int = 1024
     """Enough for a grounded answer with citations; not enough to ramble."""
 
-    answer_effort: Effort = "low"
-    """Reading passages and judging whether they answer a question is not a
-    reasoning-heavy task, and low effort keeps latency and cost down. Thinking
-    is left on: disabling it entirely on current models can leak internal tags
-    into the visible response, which would be user-facing damage for no saving.
+    answer_effort: Effort | None = None
+    """Thinking depth, or `None` to omit the parameter entirely.
+
+    **Not every model accepts this.** `effort` is supported on the Opus and
+    Sonnet tiers but is rejected by Haiku 4.5, so sending it unconditionally
+    would fail every request under the default model. It is therefore omitted
+    unless explicitly configured — and `Answerer` only includes `output_config`
+    in the request when it is set.
+
+    Set it when running on a model that supports it and the evaluation set shows
+    a reason to.
     """
 
     retrieval_top_k: int = 4

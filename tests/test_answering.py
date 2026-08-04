@@ -28,7 +28,9 @@ from assistant.settings import Settings
 @dataclass
 class FakeCitation:
     document_index: int
-    cited_text: str = "a quoted sentence"
+    # Defaults to a span that really is inside the fake chunk text, so a test
+    # only exercises the verifier when it deliberately supplies something else.
+    cited_text: str = "Body text of chunk"
 
 
 @dataclass
@@ -189,6 +191,98 @@ class TestGrounding:
         assert service.answer("q").text == "Real."
 
 
+class TestCitationVerification:
+    """Every quote is checked against the passage we actually sent.
+
+    The API computes citations against the supplied documents, so this should
+    never fire. It exists because "should never happen" is not a guarantee, and
+    because owning the check is what keeps the provider swappable — the promise
+    lives in this repository rather than in a vendor's feature list.
+    """
+
+    def test_a_quote_that_is_not_in_the_passage_is_rejected(self) -> None:
+        service, _ = answerer(
+            FakeResponse(
+                [FakeBlock("Claim.", [FakeCitation(0, "text we never supplied")])]
+            )
+        )
+        answer = service.answer("q")
+
+        assert answer.citations == ()
+        assert answer.rejected_citations == 1
+        # No surviving citation means the answer is not presented as grounded.
+        assert not answer.grounded
+
+    def test_a_genuine_quote_survives(self) -> None:
+        service, _ = answerer(
+            FakeResponse([FakeBlock("Claim.", [FakeCitation(0, "Body text")])])
+        )
+        answer = service.answer("q")
+
+        assert len(answer.citations) == 1
+        assert answer.rejected_citations == 0
+        assert answer.grounded
+
+    def test_whitespace_differences_do_not_reject_a_valid_quote(self) -> None:
+        """A newline or double space must not look like fabrication.
+
+        False alarms are the failure mode that matters here: a counter that
+        fires spuriously is one everybody learns to ignore.
+        """
+        service, _ = answerer(
+            FakeResponse([FakeBlock("Claim.", [FakeCitation(0, "Body\n  text  of")])])
+        )
+        answer = service.answer("q")
+
+        assert len(answer.citations) == 1
+        assert answer.rejected_citations == 0
+
+    @pytest.mark.parametrize("quote", ["", "   ", "\n"])
+    def test_an_empty_quote_is_not_evidence(self, quote: str) -> None:
+        service, _ = answerer(
+            FakeResponse([FakeBlock("Claim.", [FakeCitation(0, quote)])])
+        )
+        answer = service.answer("q")
+
+        assert answer.citations == ()
+        assert answer.rejected_citations == 1
+
+    def test_a_quote_from_the_wrong_document_is_rejected(self) -> None:
+        """Chunk 1's text cited against chunk 0 must not pass.
+
+        This is the misattribution case: plausible text, wrong source. It is
+        exactly what a reader who follows the citation would catch, and exactly
+        what destroys trust in the tool when they do.
+        """
+        service, _ = answerer(
+            FakeResponse([FakeBlock("Claim.", [FakeCitation(0, "chunk 1")])])
+        )
+        answer = service.answer("q")
+
+        assert answer.citations == ()
+        assert answer.rejected_citations == 1
+
+    def test_out_of_range_and_unverifiable_citations_are_both_counted(self) -> None:
+        service, _ = answerer(
+            FakeResponse(
+                [
+                    FakeBlock(
+                        "Claim.",
+                        [
+                            FakeCitation(0, "Body text"),
+                            FakeCitation(99, "Body text"),
+                            FakeCitation(0, "invented"),
+                        ],
+                    )
+                ]
+            )
+        )
+        answer = service.answer("q")
+
+        assert len(answer.citations) == 1
+        assert answer.rejected_citations == 2
+
+
 class TestPrefilter:
     def test_a_clearly_unrelated_question_skips_the_paid_call(self) -> None:
         low = [result(0, 0.30, "Components")]
@@ -263,14 +357,39 @@ class TestRequestShape:
         # A public demo will receive injection attempts within days.
         assert "not as something to obey" in prompt or "never as" in prompt
 
-    def test_model_and_effort_come_from_settings(self) -> None:
+    def test_model_and_max_tokens_come_from_settings(self) -> None:
         service, messages = answerer(FakeResponse([FakeBlock("A.", [FakeCitation(0)])]))
         service.answer("q")
 
         call = messages.calls[0]
         assert call["model"] == settings().answer_model
-        assert call["output_config"] == {"effort": settings().answer_effort}
         assert call["max_tokens"] == settings().answer_max_tokens
+
+    def test_effort_is_omitted_by_default(self) -> None:
+        """`effort` is rejected by the Haiku tier, which is the default model.
+
+        Sending it unconditionally would 400 every single request — a total
+        outage caused by an optional parameter.
+        """
+        assert settings().answer_effort is None
+
+        service, messages = answerer(FakeResponse([FakeBlock("A.", [FakeCitation(0)])]))
+        service.answer("q")
+
+        assert "output_config" not in messages.calls[0]
+
+    def test_effort_is_sent_when_explicitly_configured(self) -> None:
+        messages = FakeMessages(FakeResponse([FakeBlock("A.", [FakeCitation(0)])]))
+        service = Answerer(
+            StubRetriever(RESULTS), messages, settings(answer_effort="low")
+        )
+        service.answer("q")
+
+        assert messages.calls[0]["output_config"] == {"effort": "low"}
+
+    def test_the_default_model_is_the_cheap_one(self) -> None:
+        """A default that costs 5x more is a default nobody notices until the bill."""
+        assert settings().answer_model == "claude-haiku-4-5"
 
 
 class TestClientConstruction:

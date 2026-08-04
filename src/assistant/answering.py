@@ -68,6 +68,14 @@ class Answer:
     citations: tuple[Citation, ...]
     grounded: bool
     results: tuple[SearchResult, ...]
+    rejected_citations: int = 0
+    """Citations discarded because the quote was not in the passage we sent.
+
+    Expected to be zero: the API computes citations against the supplied
+    documents, so a quote it cannot have seen should never appear. It is counted
+    rather than ignored precisely because it should never happen — a number that
+    stops being zero is the signal that an assumption has broken.
+    """
 
     @property
     def sources(self) -> tuple[str, ...]:
@@ -116,16 +124,21 @@ class Answerer:
         if results[0].score < settings.prefilter_score:
             return Answer(NOT_IN_CORPUS, (), grounded=False, results=tuple(results))
 
-        response = self._messages.create(
-            model=settings.answer_model,
-            max_tokens=settings.answer_max_tokens,
-            system=SYSTEM_PROMPT,
-            output_config={"effort": settings.answer_effort},
-            messages=[
+        request: dict[str, Any] = {
+            "model": settings.answer_model,
+            "max_tokens": settings.answer_max_tokens,
+            "system": SYSTEM_PROMPT,
+            "messages": [
                 {"role": "user", "content": self._build_content(question, results)}
             ],
-        )
-        return self._parse(response, results)
+        }
+        # Only sent when configured. `effort` is rejected by the Haiku tier, so
+        # sending it unconditionally would fail every request under the default
+        # model — a 400 on every call, for a parameter that is optional anyway.
+        if settings.answer_effort is not None:
+            request["output_config"] = {"effort": settings.answer_effort}
+
+        return self._parse(self._messages.create(**request), results)
 
     @staticmethod
     def _build_content(
@@ -153,9 +166,28 @@ class Answerer:
         return blocks
 
     @staticmethod
-    def _parse(response: Any, results: list[SearchResult]) -> Answer:
+    def _quote_is_present(quote: str, passage: str) -> bool:
+        """Whether a quoted span genuinely appears in the passage we supplied.
+
+        Whitespace is normalised on both sides before comparing. The quote comes
+        back as the API extracted it, and a difference of a newline or a repeated
+        space would otherwise reject a perfectly valid citation — a false alarm
+        that would train us to ignore the counter this feeds.
+
+        Deliberately an exact containment check rather than a fuzzy match. The
+        question being asked is "did we actually send this text?", which has a
+        yes/no answer; a similarity score would reintroduce a threshold, and
+        ADR-0002 is about what thresholds cost.
+        """
+        if not quote.strip():
+            return False
+        return " ".join(quote.split()) in " ".join(passage.split())
+
+    @classmethod
+    def _parse(cls, response: Any, results: list[SearchResult]) -> Answer:
         parts: list[str] = []
         citations: list[Citation] = []
+        rejected = 0
 
         for block in response.content:
             if getattr(block, "type", None) != "text":
@@ -168,10 +200,22 @@ class Answerer:
                     # A citation pointing outside the documents we sent would
                     # misattribute a quote. Drop it rather than display it:
                     # a wrong citation is worse than a missing one.
+                    rejected += 1
                     continue
+
+                quote = getattr(citation, "cited_text", "") or ""
+                if not cls._quote_is_present(quote, results[index].chunk.text):
+                    # The verification the whole project promises, applied to
+                    # our own supplier. If a quote is not in the passage we
+                    # sent, it is not evidence of anything, whoever produced it.
+                    # Checking this ourselves is also what keeps the provider
+                    # swappable: the guarantee lives here, not in the vendor.
+                    rejected += 1
+                    continue
+
                 citations.append(
                     Citation(
-                        quoted_text=getattr(citation, "cited_text", ""),
+                        quoted_text=quote,
                         source=results[index].cite(),
                         chunk_index=results[index].chunk.index,
                     )
@@ -183,6 +227,7 @@ class Answerer:
             citations=tuple(citations),
             grounded=bool(citations),
             results=tuple(results),
+            rejected_citations=rejected,
         )
 
 

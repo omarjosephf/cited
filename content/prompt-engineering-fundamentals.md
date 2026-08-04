@@ -71,9 +71,16 @@ known as chain-of-thought prompting. The improvement is largest on arithmetic an
 logical tasks and smallest on straightforward retrieval, where the reasoning adds
 cost without adding accuracy.
 
-Newer reasoning models perform this step internally and do not need to be asked.
-Instructing them to "think step by step" can make responses longer without making
-them better.
+Whether a model needs to be asked for this varies, and it has changed over time.
+Some models now perform the step internally and gain nothing from being told to;
+others improve markedly.
+
+That variation is worth stating plainly, because it is the shape of most
+prompting advice. A technique that is essential against one generation of models
+can become unnecessary against the next, and the advice is rarely retracted when
+that happens — it simply circulates unchallenged. Treat any specific technique,
+including the ones in this guide, as a claim to be tested against the model you
+are actually using rather than a rule to be inherited.
 
 ## Constrain the source, not just the answer
 

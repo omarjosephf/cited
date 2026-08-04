@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Assistant</title>
+    <style>
+      /* One file, no build step, no framework. The interesting engineering in
+         this project is not in the front end, and a build pipeline here would
+         add a thing to maintain without adding anything to show. */
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #666;
+        --line: #e2e2e2;
+        --accent: #2c5aa0;
+        --quote-bg: #f6f8fa;
+        --warn: #8a4b00;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16181c;
+          --fg: #e8e8e8;
+          --muted: #9aa0a6;
+          --line: #2c2f34;
+          --accent: #7aa7e0;
+          --quote-bg: #1e2126;
+          --warn: #d9a25f;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0 auto;
+        padding: 2rem 1.25rem 4rem;
+        max-width: 46rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+      .lede { color: var(--muted); margin: 0 0 2rem; }
+      form { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+      input[type="text"] {
+        flex: 1;
+        padding: 0.7rem 0.85rem;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      input[type="text"]:focus-visible,
+      button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      button {
+        padding: 0.7rem 1.1rem;
+        font: inherit;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button[disabled] { opacity: 0.55; cursor: default; }
+      .counter { color: var(--muted); font-size: 0.85rem; margin-bottom: 2rem; }
+      #answer { white-space: pre-wrap; margin-bottom: 1.5rem; }
+      .flag {
+        padding: 0.6rem 0.85rem;
+        margin-bottom: 1rem;
+        border-left: 3px solid var(--warn);
+        background: var(--quote-bg);
+        color: var(--warn);
+        font-size: 0.9rem;
+      }
+      h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em;
+           color: var(--muted); margin: 2rem 0 0.75rem; }
+      .citation {
+        padding: 0.75rem 0.9rem;
+        margin-bottom: 0.75rem;
+        background: var(--quote-bg);
+        border-left: 3px solid var(--accent);
+        border-radius: 0 4px 4px 0;
+      }
+      .citation blockquote { margin: 0 0 0.4rem; font-style: italic; }
+      .citation cite { color: var(--muted); font-size: 0.85rem; font-style: normal; }
+      .examples { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+      .examples button {
+        display: block; width: 100%; text-align: left; margin-bottom: 0.4rem;
+        padding: 0.5rem 0.7rem; font-size: 0.9rem; font-weight: 400;
+        color: var(--accent); background: none; border: 1px solid var(--line);
+        border-radius: 4px;
+      }
+      footer { margin-top: 3rem; color: var(--muted); font-size: 0.85rem; }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <h1>Document Assistant</h1>
+    <p class="lede">
+      Ask a question about the documents in this demo. Every answer shows the
+      exact passage it came from &mdash; or says the documents do not cover it.
+    </p>
+
+    <form id="form">
+      <input
+        id="question"
+        type="text"
+        maxlength="500"
+        placeholder="What are the four components of a prompt?"
+        aria-label="Your question"
+        autocomplete="off"
+        required
+      />
+      <button id="submit" type="submit">Ask</button>
+    </form>
+    <p class="counter" id="counter"></p>
+
+    <div id="flag" class="flag" hidden></div>
+    <div id="answer"></div>
+    <div id="sources"></div>
+
+    <section class="examples">
+      <h2>Try these</h2>
+      <button type="button" data-q="What are the four components of a well-formed prompt?">
+        What are the four components of a well-formed prompt?
+      </button>
+      <button type="button" data-q="How many examples should I include when few-shot prompting?">
+        How many examples should I include when few-shot prompting?
+      </button>
+      <button type="button" data-q="How do I train my own language model?">
+        How do I train my own language model? &mdash; not covered, so it should refuse
+      </button>
+    </section>
+
+    <footer>
+      Answers come only from this demo's documents.
+      <a href="https://github.com/omarjosephf/cited">Source</a> &middot;
+      built by <a href="https://ojfr.me">OJ Florendo</a>
+    </footer>
+
+    <script>
+      const form = document.getElementById("form");
+      const input = document.getElementById("question");
+      const submit = document.getElementById("submit");
+      const answerEl = document.getElementById("answer");
+      const sourcesEl = document.getElementById("sources");
+      const flagEl = document.getElementById("flag");
+      const counterEl = document.getElementById("counter");
+
+      // Everything from the server is inserted with textContent, never innerHTML.
+      // The answer text is model output derived from documents; treating it as
+      // markup would be an injection route straight through the corpus.
+      const show = (el, text) => { el.textContent = text; };
+
+      async function refreshCounter() {
+        try {
+          const res = await fetch("/health");
+          const data = await res.json();
+          counterEl.textContent =
+            `${data.answers_remaining_today} answers remaining today · ${data.chunks} passages indexed`;
+        } catch {
+          counterEl.textContent = "";
+        }
+      }
+
+      function render(data) {
+        show(answerEl, data.answer);
+
+        if (!data.grounded) {
+          flagEl.hidden = false;
+          show(
+            flagEl,
+            data.refused
+              ? "The documents do not cover this. Nothing below is an answer from them."
+              : "This response cites no passage, so it is not grounded in the documents."
+          );
+        }
+
+        if (data.citations.length) {
+          const heading = document.createElement("h2");
+          heading.textContent = data.refused ? "Passages consulted" : "Sources";
+          sourcesEl.append(heading);
+
+          for (const citation of data.citations) {
+            const wrap = document.createElement("div");
+            wrap.className = "citation";
+            const quote = document.createElement("blockquote");
+            quote.textContent = `“${citation.quote}”`;
+            const cite = document.createElement("cite");
+            cite.textContent = citation.source;
+            wrap.append(quote, cite);
+            sourcesEl.append(wrap);
+          }
+        }
+      }
+
+      async function ask(question) {
+        answerEl.textContent = "";
+        sourcesEl.textContent = "";
+        flagEl.hidden = true;
+        submit.disabled = true;
+        submit.textContent = "Thinking…";
+
+        try {
+          const res = await fetch("/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+          });
+
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            flagEl.hidden = false;
+            show(
+              flagEl,
+              res.status === 429
+                ? "Too many questions in a short time. Please wait a moment."
+                : body.detail || `Request failed (${res.status}).`
+            );
+            return;
+          }
+          render(await res.json());
+        } catch {
+          flagEl.hidden = false;
+          show(flagEl, "Could not reach the service.");
+        } finally {
+          submit.disabled = false;
+          submit.textContent = "Ask";
+          refreshCounter();
+        }
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const question = input.value.trim();
+        if (question) ask(question);
+      });
+
+      for (const button of document.querySelectorAll(".examples button")) {
+        button.addEventListener("click", () => {
+          input.value = button.dataset.q;
+          ask(button.dataset.q);
+        });
+      }
+
+      refreshCounter();
+    </script>
+  </body>
+</html>

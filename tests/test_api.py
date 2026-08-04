@@ -1,0 +1,241 @@
+"""Tests for the HTTP layer.
+
+No network and no API key: the answerer is replaced by a stub, because what
+needs testing here is transport and protection, not answering. Answering has its
+own tests.
+
+The protections are the reason this file exists. A public endpoint that makes
+paid calls fails in ways that cost money rather than correctness, and those
+paths are the ones least likely to be exercised by hand.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+
+from assistant import api
+from assistant.answering import Answer, Citation
+from assistant.budget import DailyCallBudget
+from assistant.chunking import Chunk
+from assistant.retrieval import SearchResult
+from assistant.settings import Settings
+
+
+def chunk(index: int = 0, section: str = "Components") -> Chunk:
+    return Chunk(
+        text=f"Body of chunk {index}.",
+        source="guide.md",
+        page=None,
+        section=section,
+        index=index,
+    )
+
+
+def grounded_answer() -> Answer:
+    return Answer(
+        text="Four parts: role, task, context and format.",
+        citations=(
+            Citation(
+                quoted_text="role, task, context and format",
+                source="guide.md — Components",
+                chunk_index=0,
+            ),
+        ),
+        grounded=True,
+        results=(SearchResult(chunk=chunk(), score=0.8),),
+    )
+
+
+class StubAnswerer:
+    def __init__(self, answer: Answer | None = None, error: Exception | None = None):
+        self.answer_value = answer or grounded_answer()
+        self.error = error
+        self.questions: list[str] = []
+
+    def answer(self, question: str) -> Answer:
+        self.questions.append(question)
+        if self.error:
+            raise self.error
+        return self.answer_value
+
+
+@pytest.fixture
+def client() -> Iterator[TestClient]:
+    """A client with the corpus and answerer stubbed, and limits reset.
+
+    Constructed **without** the context manager, deliberately. Entering
+    `TestClient` as a context manager runs the app's lifespan, which reads the
+    real corpus, loads the embedding model, and — the part that actually bit —
+    overwrites every attribute set here with the production defaults. The stubs
+    were being installed and then silently replaced, so the tests were
+    exercising real configuration while appearing to control it.
+
+    Skipping lifespan keeps these tests fast, independent of `content/`, and
+    actually in charge of the state they assert on.
+    """
+    api.state.settings = Settings(anthropic_api_key=SecretStr("test-key"))
+    api.state.answerer = StubAnswerer()  # type: ignore[assignment]
+    api.state.budget = DailyCallBudget(limit=100)
+    api.state.chunk_count = 10
+    # slowapi keeps counters between tests otherwise, so the first test to run
+    # would consume the allowance for the rest.
+    api.limiter.reset()
+    yield TestClient(api.app)
+
+
+class TestAsk:
+    def test_a_grounded_answer_returns_its_citations(self, client: TestClient) -> None:
+        response = client.post("/ask", json={"question": "What are the components?"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["grounded"] is True
+        assert body["citations"][0]["source"] == "guide.md — Components"
+        assert body["citations"][0]["quote"]
+
+    def test_an_ungrounded_answer_is_flagged_not_hidden(
+        self, client: TestClient
+    ) -> None:
+        """The client must be able to tell prose from a sourced answer.
+
+        Returning it without the flag would let a caller present unsupported
+        text as though it were cited, which is the failure the whole project
+        exists to prevent.
+        """
+        api.state.answerer = StubAnswerer(  # type: ignore[assignment]
+            Answer("Not covered.", (), grounded=False, results=(), refused=True)
+        )
+        body = client.post("/ask", json={"question": "anything"}).json()
+
+        assert body["grounded"] is False
+        assert body["refused"] is True
+        assert body["answer"] == "Not covered."
+
+    def test_the_question_is_passed_through_stripped(self, client: TestClient) -> None:
+        stub = StubAnswerer()
+        api.state.answerer = stub  # type: ignore[assignment]
+        client.post("/ask", json={"question": "  spaced out  "})
+
+        assert stub.questions == ["spaced out"]
+
+    @pytest.mark.parametrize("question", ["", "   ", "\n\t"])
+    def test_an_empty_question_is_rejected_without_paying(
+        self, client: TestClient, question: str
+    ) -> None:
+        before = api.state.budget.used
+        response = client.post("/ask", json={"question": question})
+
+        assert response.status_code == 422
+        assert api.state.budget.used == before, "an invalid request must cost nothing"
+
+    def test_an_overlong_question_is_rejected(self, client: TestClient) -> None:
+        """The caller controls the input, so the input needs a ceiling.
+
+        Without one, a single request can be made arbitrarily expensive.
+        """
+        response = client.post(
+            "/ask", json={"question": "x" * (api.MAX_QUESTION_CHARS + 1)}
+        )
+        assert response.status_code == 422
+
+
+class TestBudget:
+    def test_the_daily_ceiling_returns_503_rather_than_spending(
+        self, client: TestClient
+    ) -> None:
+        api.state.budget = DailyCallBudget(limit=1)
+
+        assert client.post("/ask", json={"question": "one"}).status_code == 200
+        response = client.post("/ask", json={"question": "two"})
+
+        assert response.status_code == 503
+        assert "daily limit" in response.json()["detail"]
+
+    def test_a_failed_call_refunds_its_reservation(self, client: TestClient) -> None:
+        """A provider outage must not burn the day's allowance.
+
+        Otherwise an hour of upstream failure leaves the demo unable to answer
+        anything for the rest of the day, having answered nothing.
+        """
+        api.state.answerer = StubAnswerer(error=RuntimeError("upstream down"))  # type: ignore[assignment]
+        before = api.state.budget.used
+
+        response = client.post("/ask", json={"question": "anything"})
+
+        assert response.status_code == 502
+        assert api.state.budget.used == before
+
+    def test_an_upstream_failure_does_not_leak_internals(
+        self, client: TestClient
+    ) -> None:
+        """A stack trace tells an attacker about paths, versions and structure."""
+        api.state.answerer = StubAnswerer(  # type: ignore[assignment]
+            error=RuntimeError("connection to 10.0.0.5:443 failed: bad token sk-xyz")
+        )
+        detail = client.post("/ask", json={"question": "q"}).json()["detail"]
+
+        assert detail == "The answering service is unavailable."
+        assert "10.0.0.5" not in detail
+        assert "sk-xyz" not in detail
+
+
+class TestRateLimit:
+    def test_a_burst_is_throttled(self, client: TestClient) -> None:
+        api.state.budget = DailyCallBudget(limit=1000)
+        codes = [
+            client.post("/ask", json={"question": f"q{i}"}).status_code
+            for i in range(15)
+        ]
+
+        assert 429 in codes, "expected the burst to be rate limited"
+        assert codes.count(200) <= 10, "more requests served than the limit allows"
+
+
+class TestHealth:
+    def test_health_reports_what_an_operator_needs(self, client: TestClient) -> None:
+        body = client.get("/health").json()
+
+        assert body["status"] == "ok"
+        assert body["chunks"] == 10
+        assert body["answers_remaining_today"] == 100
+
+    def test_health_is_not_rate_limited(self, client: TestClient) -> None:
+        """A platform health check must not be throttled into reporting failure."""
+        codes = {client.get("/health").status_code for _ in range(30)}
+        assert codes == {200}
+
+    def test_health_does_not_expose_configuration(self, client: TestClient) -> None:
+        body: dict[str, Any] = client.get("/health").json()
+        serialised = str(body).lower()
+
+        for leak in ("key", "secret", "token", "sk-ant"):
+            assert leak not in serialised
+
+
+class TestPage:
+    def test_the_page_renders(self, client: TestClient) -> None:
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert "Document Assistant" in response.text
+
+    def test_the_page_never_assigns_untrusted_text_as_markup(
+        self, client: TestClient
+    ) -> None:
+        """Model output is derived from documents; rendering it as HTML would be
+        an injection route straight through the corpus.
+
+        Matches an *assignment* rather than the bare word: the page's own
+        comment explains why `innerHTML` is avoided, and a substring check on
+        the word alone fails on the documentation of the very rule it enforces.
+        """
+        page = client.get("/").text
+
+        for dangerous in ("innerHTML =", "innerHTML=", "outerHTML =", "document.write"):
+            assert dangerous not in page, f"page uses {dangerous}"
+        assert "textContent" in page, "expected text to be inserted safely"

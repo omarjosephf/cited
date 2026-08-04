@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 4
     """How many chunks are put in front of the model."""
 
+    daily_answer_limit: int = 200
+    """Hard ceiling on paid calls per UTC day for the HTTP service.
+
+    At the default model this bounds the demo to roughly $0.44 a day. Rate
+    limiting alone would not: 10 requests a minute still permits over fourteen
+    thousand paid calls a day, which is a bill rather than a demo.
+
+    This is a stop *before* the provider's own cap, so the service can explain
+    itself rather than failing with a billing error. It is not a substitute for
+    setting that cap — this counter resets when the process restarts, and the
+    provider's does not.
+    """
+
     prefilter_score: float = 0.45
     """Below this, skip the paid call entirely.
 

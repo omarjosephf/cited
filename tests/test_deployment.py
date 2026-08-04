@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -108,6 +109,72 @@ class TestBuildStageHasEverythingItNeeds:
             "the site-packages path in the model-download step is hardcoded and "
             "must be bumped alongside the base image"
         )
+
+
+@pytest.fixture(scope="module")
+def fly() -> dict[str, Any]:
+    with (REPO / "fly.toml").open("rb") as handle:
+        return tomllib.load(handle)
+
+
+class TestPlatformConfigAgreesWithTheImage:
+    """Three files have to name the same port, in three different syntaxes.
+
+    A mismatch does not raise anything. The container starts, serves nobody,
+    fails its health check, and the platform reports the deployment as unhealthy
+    without saying why.
+    """
+
+    def test_the_port_is_the_same_everywhere(
+        self, fly: dict[str, Any], dockerfile: str
+    ) -> None:
+        declared = int(fly["env"]["PORT"])
+        assert fly["http_service"]["internal_port"] == declared, (
+            "fly routes to internal_port; the app listens on $PORT"
+        )
+        assert f"PORT={declared}" in dockerfile, (
+            "the Dockerfile default must match, or a local `docker run` without "
+            "an explicit PORT listens somewhere else"
+        )
+        assert f"EXPOSE {declared}" in dockerfile
+
+    def test_https_is_forced(self, fly: dict[str, Any]) -> None:
+        assert fly["http_service"]["force_https"] is True
+
+    def test_the_health_check_avoids_the_paid_path(self, fly: dict[str, Any]) -> None:
+        """Checked every 30s. Pointing it at /ask would bill for every check."""
+        checks = fly["http_service"]["checks"]
+        assert [c["path"] for c in checks] == ["/health"]
+
+    def test_the_budget_survives_between_requests(self, fly: dict[str, Any]) -> None:
+        """The daily budget is a counter in process memory.
+
+        A machine that stops and restarts resets it, so the limit it appears to
+        enforce is not the limit that applies. Scaling to zero is a legitimate
+        choice, but it must be a deliberate one — this test makes changing it
+        require saying so.
+        """
+        assert fly["http_service"]["min_machines_running"] == 1, (
+            "setting this to 0 leaves the provider-side spend cap as the only "
+            "real ceiling on spend; update this test deliberately if that is "
+            "the intent"
+        )
+
+    def test_the_memory_tier_has_headroom_over_what_was_measured(
+        self, fly: dict[str, Any]
+    ) -> None:
+        """Measured peak is 263 MB; ~300 MB with the web layer on top.
+
+        Written down because the previous value was reasoned rather than
+        measured, was wrong, and cost roughly three times the correct tier.
+        """
+        memory = str(fly["vm"][0]["memory"]).lower()
+        megabytes = (
+            int(memory.removesuffix("gb")) * 1024
+            if memory.endswith("gb")
+            else int(memory.removesuffix("mb"))
+        )
+        assert megabytes >= 512, f"{memory} is below the measured ~300 MB working set"
 
 
 class TestSecretsStayOutOfTheImage:

@@ -21,12 +21,21 @@ primary_region = "lhr"          # London: nearest to the author and to UK reader
   auto_stop_machines = "stop"
   auto_start_machines = true
 
-  # Kept warm rather than scaled to zero.
+  # Kept warm rather than scaled to zero — but not for the reason first assumed.
   #
-  # A stopped machine has to boot and load the embedding model before it can
-  # answer, and the first visitor pays that wait. For a portfolio demo somebody
-  # opens once, a slow first impression is the whole impression — so one machine
-  # stays running even though zero would be cheaper.
+  # Startup was expected to be slow. Measured, it is not: 1.8s from a cold
+  # process to a built index (0.1s imports, 1.4s ONNX session, 0.3s embedding
+  # the corpus), with the model already baked into the image. Machine boot on
+  # top of that still leaves a few seconds, which a portfolio demo could afford.
+  #
+  # The real reason is the daily budget. It is a counter in process memory, so
+  # it only bounds spend across a process lifetime — a machine that stops and
+  # starts begins again at zero, and the cap it appears to enforce is not the
+  # cap that applies. Staying up is what makes that protection true.
+  #
+  # Setting this to 0 is therefore a deliberate trade, not a saving: it cuts the
+  # bill to near nothing and leaves the provider-side spend cap as the only real
+  # ceiling. That cap must exist either way; here it would be load-bearing.
   min_machines_running = 1
 
   [http_service.concurrency]
@@ -48,8 +57,16 @@ primary_region = "lhr"          # London: nearest to the author and to UK reader
 
 [[vm]]
   size = "shared-cpu-1x"
-  # 512 MB is not enough: ONNX Runtime plus the loaded model plus the Python
-  # process sits above it, and the failure mode is the container being killed
-  # mid-request rather than any error that explains itself.
-  memory = "1gb"
+  # Measured, not guessed. Peak resident memory with the model loaded, the
+  # corpus indexed and 25 queries served is 263 MB; the web server and the
+  # Anthropic client add tens of MB and load no model, so the working figure is
+  # roughly 300 MB. This was set to 1 GB on the reasoning that 512 MB "is not
+  # enough", which was wrong and cost about three times the price of the tier
+  # that fits.
+  #
+  # 512 MB leaves ~40% headroom. That is comfortable but not unlimited: a much
+  # larger corpus grows the index, and the failure mode is the container being
+  # killed mid-request rather than any error that explains itself. Re-measure
+  # before adding documents in bulk.
+  memory = "512mb"
   cpus = 1

@@ -1,0 +1,107 @@
+# The evaluation set.
+#
+# TOML rather than YAML so the harness needs no dependency: `tomllib` is in the
+# standard library from Python 3.11. Comments matter here — a question set is
+# read by humans deciding whether it is a fair test, and a format that cannot
+# explain itself makes that harder.
+#
+# `expects` names the section that genuinely answers the question. Retrieval is
+# scored on whether that section comes back, so a wrong `expects` produces a
+# wrong score rather than an error — check these by hand when adding questions.
+#
+# `answerable = false` questions have no expected section. They exist to test
+# refusal, which is the harder half: a system that answers everything scores
+# perfectly on the first group and is still useless.
+
+# ---------------------------------------------------------------------------
+# Answerable — the corpus genuinely contains these.
+# ---------------------------------------------------------------------------
+
+[[question]]
+text = "What are the four components of a well-formed prompt?"
+expects = "The four components of a well-formed prompt"
+answerable = true
+note = "Direct factual lookup. If this fails, nothing else matters."
+
+[[question]]
+text = "How many examples should I include when few-shot prompting?"
+expects = "Show the model what good looks like"
+answerable = true
+note = "The answer is a range (two or three, falling away past five)."
+
+[[question]]
+text = "What is the difference between zero-shot and few-shot prompting?"
+expects = "Show the model what good looks like"
+answerable = true
+
+[[question]]
+text = "Why is 'make it short' a bad instruction?"
+expects = "Specificity beats politeness"
+answerable = true
+note = "Phrased as a question the document never asks in those words."
+
+[[question]]
+text = "How do I stop a model inventing facts that are not in my document?"
+expects = "Constrain the source, not just the answer"
+answerable = true
+note = "Describes the problem rather than naming the technique."
+
+[[question]]
+text = "What is chain-of-thought prompting and when does it help most?"
+expects = "Give the model room to reason"
+answerable = true
+
+[[question]]
+text = "How should I improve a prompt that is not working?"
+expects = "Iterate deliberately"
+answerable = true
+
+[[question]]
+text = "When is a better prompt not the answer to the problem?"
+expects = "Where prompting stops being enough"
+answerable = true
+
+[[question]]
+text = "Does a language model remember our previous conversation?"
+expects = "What a prompt actually is"
+answerable = true
+note = "Answer is stated as a consequence, not as a heading."
+
+[[question]]
+text = "What should I check before sending an important prompt?"
+expects = "A short checklist"
+answerable = true
+
+# ---------------------------------------------------------------------------
+# Unanswerable — refusal tests.
+#
+# Deliberately graded by difficulty. The last two are the interesting ones:
+# both are *about language models*, so they score highly on topical similarity
+# while having no answer in the corpus. ADR-0002 exists because of exactly this
+# distinction — relatedness is not answerability.
+# ---------------------------------------------------------------------------
+
+[[question]]
+text = "What is the capital of France?"
+answerable = false
+note = "Unrelated to anything. The prefilter should catch this before any paid call."
+
+[[question]]
+text = "What is the weather in Windsor today?"
+answerable = false
+note = "Unrelated, and unanswerable by any document — it needs live data."
+
+[[question]]
+text = "How much does the Anthropic API cost per million tokens?"
+answerable = false
+note = "Adjacent topic, specific fact, absent from the corpus."
+
+[[question]]
+text = "How do I train my own language model?"
+answerable = false
+note = "Scored 0.755 in M2 — higher than seven genuinely answerable questions."
+
+[[question]]
+text = "Which model should I use for a production system?"
+answerable = false
+note = "Sounds exactly like something this guide would answer. It does not."

@@ -18,7 +18,7 @@ ADR-0002 records the measurement that ruled the threshold approach out.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from assistant.retrieval import Retriever, SearchResult
 from assistant.settings import Settings
@@ -241,3 +241,19 @@ def build_client(settings: Settings) -> Anthropic:
     from anthropic import Anthropic
 
     return Anthropic(api_key=settings.anthropic_api_key.get_secret_value())
+
+
+def message_creator(settings: Settings) -> MessageCreator:
+    """Adapt the Anthropic client to the narrow interface this module needs.
+
+    The SDK's `messages.create` is a set of overloads with named parameters, so
+    it does not *structurally* satisfy a `**kwargs` protocol even though calling
+    it that way works perfectly. The cast is confined to this one function
+    rather than spread across call sites, and it is the only place where a
+    third-party signature is asserted rather than checked.
+
+    The protocol stays narrow on purpose: it is what makes the answering logic
+    testable without a key, and what would make a different provider a new
+    adapter here rather than a change to `Answerer`.
+    """
+    return cast(MessageCreator, build_client(settings).messages)

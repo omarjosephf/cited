@@ -40,6 +40,9 @@ dev = ["pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8", "mypy>=1.13", "pyyaml>=6.0
 # missing one is obvious, the broken one looks like the project does not work.
 # Restore this line in the same commit that adds `assistant/cli.py`.
 
+[project.scripts]
+doc-assistant = "assistant.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/assistant"]
 

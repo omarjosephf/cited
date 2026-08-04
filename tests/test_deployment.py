@@ -198,6 +198,47 @@ class TestSecretsStayOutOfTheImage:
         assert "ANTHROPIC_API_KEY" not in dockerfile
 
 
+class TestTheCorpusReachesTheImage:
+    """The documents are Markdown, and .dockerignore excludes `*.md`.
+
+    Those two facts sit in different files and are fine only because Docker's
+    patterns do not cross a `/` — `*.md` matches README.md at the root, not
+    content/prompt-engineering-fundamentals.md. That is a documented behaviour
+    the whole demo rests on, and a pattern changed to `**/*.md` in a tidy-up
+    would empty the corpus.
+
+    The failure is at least loud: the lifespan raises when no documents load, so
+    the container dies at startup instead of serving a system that refuses every
+    question. Loud and in production is still worse than loud and here.
+    """
+
+    def test_no_ignore_pattern_reaches_into_the_corpus(self) -> None:
+        patterns = [
+            line.strip()
+            for line in (REPO / ".dockerignore")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        reaching = [
+            p for p in patterns if p.startswith("**/") and not p.startswith("!")
+        ]
+        assert not reaching, (
+            f"{reaching} cross directory boundaries and may exclude the corpus"
+        )
+        assert "content" not in patterns
+
+    def test_the_corpus_is_copied_into_the_runtime_stage(self, dockerfile: str) -> None:
+        assert "COPY --chown=app:app content/ ./content/" in dockerfile
+
+    def test_the_working_directory_matches_the_corpus_path(
+        self, dockerfile: str
+    ) -> None:
+        """The app opens `content/` relative to the working directory."""
+        assert "WORKDIR /app" in dockerfile
+        assert "./content/" in dockerfile
+
+
 class TestRuntimeMatchesItsAssumptions:
     def test_it_runs_as_a_non_root_user(self, dockerfile: str) -> None:
         assert re.search(r"^USER app", dockerfile, re.MULTILINE)

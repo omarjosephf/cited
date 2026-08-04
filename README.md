@@ -3,21 +3,37 @@
 Ask a question about a set of documents. Get an answer **with the exact passage
 it came from** — or an honest "that isn't covered in these documents."
 
-> **Status: in development.** Milestone 0 (dependency spike) is complete and
-> documented in [ADR-0001](docs/adr/0001-embeddings-without-pytorch.md). The
-> ingestion, retrieval and answering layers are being built next. This README
-> describes what exists; sections marked *planned* do not exist yet.
+> **Status: in development.** Ingestion, chunking, embedding and retrieval are
+> built and tested (60 tests, 100% coverage). Answering, the evaluation harness
+> and the deployment are not. This README describes what exists; anything marked
+> *planned* does not exist yet, and there is no command-line interface until M3.
 
 ---
 
 ## The problem
 
-Employees spend around **nine hours a week** looking for information that already
-exists inside their own organisation. IDC put the cost to a 1,000-person business
-at over **$5M a year**. The information is not missing — it is unfindable.
+Microsoft's 2025 Work Trend Index found that employees are
+["interrupted every two minutes during core work hours—275 times a day—by
+meetings, emails, or chats"](https://www.microsoft.com/en-us/worklab/work-trend-index/breaking-down-infinite-workday)
+(17 June 2025). Attention is the scarce resource, and every trip to go and find
+something costs another slice of it.
+
+The information usually is not missing. It is unfindable, and looking for it is
+expensive precisely because the looking interrupts something else.
 
 Ordinary search returns a list of documents and leaves you to read them. This
 returns the answer, and shows you where it came from so you can check it.
+
+> **A note on the statistic I did not use.** The figure normally quoted here is
+> that workers spend around nine hours a week searching for information, costing
+> a 1,000-person company $5M a year. Both come from an IDC paper published in
+> **2001**, are almost always repeated without that date, and conflate two
+> separate findings — the hours measure time spent searching, the $5M measures
+> the cost of *duplicating* work. There is enough written about the provenance of
+> that number to call it a myth. I could not find a recent primary source
+> measuring the same thing, so I have not claimed one. A project whose entire
+> premise is that you should be able to check a claim should not open with one
+> you cannot.
 
 ## What makes this different from "chat with your PDF"
 
@@ -47,9 +63,31 @@ Summary:
 | --- | --- | --- |
 | Embeddings | ONNX via `fastembed`, not PyTorch | 223 MB vs ~2 GB, verified working on Python 3.13/Windows before anything depended on it — [ADR-0001](docs/adr/0001-embeddings-without-pytorch.md) |
 | Embedding location | Local, not a hosted API | No per-query cost on the retrieval path, no second vendor |
-| Retrieval | *(planned)* numpy cosine similarity behind a `Retriever` interface | At this corpus size a vector database is complexity without benefit; the interface keeps the upgrade cheap |
-| Citations | *(planned)* Claude's native citations | Structured source locations, rather than prompting for citations and hoping they are real |
-| Refusal | *(planned)* similarity threshold | Starting near 0.45, from the 0.69/0.32 separation measured in ADR-0001 — then tuned against the evaluation set |
+| Retrieval | numpy cosine similarity behind a `Retriever` interface | At this corpus size a vector database is complexity without benefit; the interface keeps the upgrade cheap. **9/10 top-1 on the project corpus, 5.4 ms mean query** |
+| Query encoding | `bge` instruction prefix applied by hand | `fastembed`'s `query_embed()` is byte-identical to `embed()`, so it applies no prefix at all. Adding it moved top-1 from 5/9 to 7/9 — measured, not assumed |
+| Citations | *(planned — M3)* Claude's native citations | Structured source locations, rather than prompting for citations and hoping they are real |
+| Refusal | *(planned — M3)* the model judges the retrieved passages | **Not** a similarity threshold. That was the plan until it was measured: out-of-scope questions do not reliably score lower, because embedding similarity measures topical relatedness rather than answerability. See the row below |
+
+### The measurement that changed the design
+
+A similarity threshold cannot separate answerable questions from unanswerable
+ones on this corpus:
+
+| | Top score |
+| --- | --- |
+| In-scope questions, lowest | 0.666 |
+| Out-of-scope questions, highest | **0.755** |
+
+*"How do I train my own language model?"* scores 0.755 — higher than seven of the
+ten questions the corpus **can** answer — because it is topically adjacent to a
+document about language models. The ranges overlap by 0.089, so no cutoff exists
+that separates them.
+
+This is a property of the technique rather than a threshold left untuned, so
+refusal has to come from the model reading the retrieved passages and judging
+whether they actually answer the question. A score threshold survives only as a
+cheap pre-filter for the obviously unrelated (*"what is the capital of France?"*
+scores 0.428).
 
 ---
 

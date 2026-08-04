@@ -34,8 +34,11 @@ dependencies = [
 api = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.32,<1", "slowapi>=0.1.9,<1"]
 dev = ["pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8", "mypy>=1.13", "pyyaml>=6.0"]
 
-[project.scripts]
-doc-assistant = "assistant.cli:main"
+# No console script yet. One was declared here before the module existed, which
+# meant `pip install -e .` produced a `doc-assistant` command that died with
+# ModuleNotFoundError. A broken entry point is worse than a missing one: the
+# missing one is obvious, the broken one looks like the project does not work.
+# Restore this line in the same commit that adds `assistant/cli.py`.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/assistant"]

@@ -1,0 +1,55 @@
+# Fly.io configuration.
+#
+# The app name is set by `fly launch` and must be globally unique; change it
+# there rather than guessing one here.
+
+app = "cited-demo"
+primary_region = "lhr"          # London: nearest to the author and to UK readers
+
+[build]
+
+[env]
+  PORT = "8080"
+  # ANTHROPIC_API_KEY is NOT set here. This file is committed, so anything in it
+  # is public. The key is set with `fly secrets set`, which stores it encrypted
+  # and injects it at runtime without it ever entering the repository or an
+  # image layer.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+  # Kept warm rather than scaled to zero.
+  #
+  # A stopped machine has to boot and load the embedding model before it can
+  # answer, and the first visitor pays that wait. For a portfolio demo somebody
+  # opens once, a slow first impression is the whole impression — so one machine
+  # stays running even though zero would be cheaper.
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    # Well below what the process could serve. The bottleneck is not the web
+    # layer, it is the paid API call behind it, and queueing requests is
+    # preferable to running several expensive calls at once.
+    soft_limit = 20
+    hard_limit = 40
+
+[[http_service.checks]]
+  # /health reports the corpus size and the remaining daily budget without
+  # touching the paid path, so checking it frequently costs nothing.
+  path = "/health"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "60s"          # room for the model to load on a cold start
+  method = "GET"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 512 MB is not enough: ONNX Runtime plus the loaded model plus the Python
+  # process sits above it, and the failure mode is the container being killed
+  # mid-request rather than any error that explains itself.
+  memory = "1gb"
+  cpus = 1

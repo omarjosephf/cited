@@ -9,6 +9,8 @@ what is being measured is retrieval *quality* rather than retrieval mechanics.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from numpy.typing import NDArray
@@ -199,10 +201,13 @@ class FakeTextEmbedding:
     """Stands in for fastembed's model, returning deliberately un-normalised rows."""
 
     instances = 0
+    last_cache_dir: str | None = None
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, cache_dir: str | None = None) -> None:
         FakeTextEmbedding.instances += 1
+        FakeTextEmbedding.last_cache_dir = cache_dir
         self.model_name = model_name
+        self.cache_dir = cache_dir
 
     def embed(self, texts: list[str]) -> list[NDArray[np.float32]]:
         # Row scale varies and one row is all-zero, so both the normalisation
@@ -240,3 +245,78 @@ class TestEncoding:
         embedder.embed_query("two")
 
         assert FakeTextEmbedding.instances == 1
+
+
+class TestModelCacheLocation:
+    """Where the embedding model is cached, and why it is configurable.
+
+    The container pre-downloads the model at build time so a cold start does not
+    pay for it. That only works if the running process looks in the same place
+    the build wrote to, and fastembed reads no environment variable of its own --
+    `cache_dir` is a constructor argument. A Dockerfile setting a plausible
+    `FASTEMBED_CACHE_PATH` therefore does nothing, and the model is silently
+    re-downloaded on every cold start.
+
+    That mistake was written, shipped into a Dockerfile, and caught only by
+    checking fastembed's actual source. These tests exist so it cannot return.
+    """
+
+    def test_the_environment_variable_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("EMBEDDING_CACHE_DIR", "/opt/models")
+        assert FastEmbedEmbedder()._cache_dir == "/opt/models"
+
+    def test_an_explicit_argument_wins_over_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("EMBEDDING_CACHE_DIR", "/from/env")
+        assert FastEmbedEmbedder(cache_dir="/explicit")._cache_dir == "/explicit"
+
+    def test_it_falls_back_to_fastembeds_own_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """None means "let fastembed decide", which is right for local use."""
+        monkeypatch.delenv("EMBEDDING_CACHE_DIR", raising=False)
+        assert FastEmbedEmbedder()._cache_dir is None
+
+    def test_an_empty_variable_is_treated_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty string would be passed through as a path to "" otherwise."""
+        monkeypatch.setenv("EMBEDDING_CACHE_DIR", "")
+        assert FastEmbedEmbedder()._cache_dir is None
+
+    def test_the_resolved_directory_reaches_the_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolving the path is worthless if it is never passed on.
+
+        `cache_dir` is the only channel fastembed offers, so a refactor that
+        drops it from the constructor call re-creates the original bug while
+        every other test in this class still passes.
+        """
+        import fastembed
+
+        FakeTextEmbedding.last_cache_dir = None
+        monkeypatch.setattr(fastembed, "TextEmbedding", FakeTextEmbedding)
+        monkeypatch.setenv("EMBEDDING_CACHE_DIR", "/opt/models")
+
+        FastEmbedEmbedder().embed_passages(["anything, to force the load"])
+
+        assert FakeTextEmbedding.last_cache_dir == "/opt/models"
+
+    def test_the_dockerfile_and_the_code_agree_on_the_variable_name(self) -> None:
+        """The two halves are in different files and different languages.
+
+        A rename on one side is invisible to the other until a container starts
+        re-downloading the model, which nobody notices because it still works.
+        """
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        assert "EMBEDDING_CACHE_DIR=/opt/models" in dockerfile
+        assert "cache_dir='/opt/models'" in dockerfile, (
+            "the build stage must pass cache_dir explicitly: fastembed reads no "
+            "environment variable of its own"
+        )

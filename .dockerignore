@@ -1,0 +1,47 @@
+# Everything the image must not contain.
+#
+# The first entries are the ones that matter. A .env copied into an image is a
+# credential published with it: image layers are readable by anyone who can pull
+# the image, and deleting the file in a later layer does not remove it from the
+# earlier one. `docker history` is enough to recover it.
+#
+# There is a test for this in the repository (tests/test_no_secrets_committed.py)
+# but it guards *git*, not Docker. This file is the equivalent guard for images,
+# and it is deny-by-accident rather than deny-by-default — so it is worth reading
+# rather than skimming.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Version control and CI
+.git
+.github
+.gitignore
+.gitattributes
+
+# Local environments and caches
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Model cache — deliberately excluded so it is fetched during the build on the
+# target platform rather than copied from a developer machine, where it may be
+# a different architecture.
+.fastembed_cache
+.index
+
+# Not needed at runtime. Tests are run by CI, not by the container.
+tests
+eval/results
+docs
+*.md
+!README.md

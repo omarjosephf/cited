@@ -12,6 +12,7 @@ system is answer generation.
 
 from __future__ import annotations
 
+import os
 from typing import Protocol, cast
 
 import numpy as np
@@ -66,15 +67,28 @@ class FastEmbedEmbedder:
     time but should not pay a model load before it can serve a health check.
     """
 
-    def __init__(self, model_name: str = MODEL_NAME) -> None:
+    def __init__(
+        self, model_name: str = MODEL_NAME, cache_dir: str | None = None
+    ) -> None:
         self._model_name = model_name
+        # Falls back to `EMBEDDING_CACHE_DIR`, then to fastembed's own default.
+        #
+        # This exists so a container image can pre-download the model at build
+        # time and have the running process find it. fastembed takes the cache
+        # location as a constructor argument and reads no environment variable
+        # of its own — a Dockerfile that sets one and expects it to be honoured
+        # downloads the model again on every cold start, which reads to a
+        # visitor as the demo being broken rather than loading.
+        self._cache_dir = cache_dir or os.environ.get("EMBEDDING_CACHE_DIR") or None
         self._model: object | None = None
 
     def _loaded(self) -> object:
         if self._model is None:
             from fastembed import TextEmbedding
 
-            self._model = TextEmbedding(model_name=self._model_name)
+            self._model = TextEmbedding(
+                model_name=self._model_name, cache_dir=self._cache_dir
+            )
         return self._model
 
     @property

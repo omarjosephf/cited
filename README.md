@@ -3,10 +3,8 @@
 Ask a question about a set of documents. Get an answer **with the exact passage
 it came from** — or an honest "that isn't covered in these documents."
 
-> **Status: in development.** Ingestion, chunking, embedding and retrieval are
-> built and tested (60 tests, 100% coverage). Answering, the evaluation harness
-> and the deployment are not. This README describes what exists; anything marked
-> *planned* does not exist yet, and there is no command-line interface until M3.
+Every claim about quality below is reproducible with one command:
+`doc-assistant eval`.
 
 ---
 
@@ -37,36 +35,67 @@ returns the answer, and shows you where it came from so you can check it.
 
 ## What makes this different from "chat with your PDF"
 
-Most demos of this kind answer confidently whether or not they should. Three
-things here are deliberate:
+Most demos of this kind answer confidently whether or not they should.
 
-**It cites its sources.** Every answer points to the passage that supports it,
-with the page number. You can verify the answer without trusting it.
+**It cites its sources, and the citations are verified.** Citations come from
+the Anthropic API's native citations feature, computed against the documents
+actually supplied — not from asking a model to "include the source" and hoping.
+Then every quote is checked again here, against the passage we sent. A quote
+that does not appear in it is discarded and counted. That check has never
+fired, which is the point: it is how we would know if it stopped being true.
 
-**It refuses.** When retrieval finds nothing relevant enough, it says so instead
-of inventing something plausible. A confident wrong answer is worse than no
-answer, because you cannot tell it is wrong.
+**It refuses, and refusal is measured.** When the documents do not contain the
+answer, it says so. That is scored on every evaluation run, in both directions —
+questions wrongly refused as well as questions wrongly answered.
 
-**It is measured, not asserted.** *(planned — M4)* A committed question set scores
-retrieval hit rate, citation accuracy, and whether out-of-scope questions are
-correctly refused. Claims about quality in this README will be backed by numbers
-that anyone can reproduce with one command.
+**It is measured, not asserted.** A committed question set, scored by one
+command, with the failing cases printed.
+
+---
+
+## Results
+
+From `doc-assistant eval` on the committed question set (15 questions,
+10 answerable, 5 not) against the demo corpus:
+
+| Retrieval | |
+| --- | --- |
+| Hit rate (expected section in top-4) | **100%** |
+| Top-1 (expected section ranked first) | **80%** |
+| Score separation | **−0.119** |
+
+| Answering | |
+| --- | --- |
+| Accuracy | **100%** |
+| Unanswerable questions correctly refused | **100%** |
+| Answerable questions wrongly refused | **0%** |
+| Citations rejected as unverifiable | **0** |
+
+Answering figures are five consecutive runs. Before the refusal marker was
+introduced they oscillated between 93% and 100% — see
+[ADR-0003](docs/adr/0003-refusal-marker.md) for why, since the instability was a
+bug in the scoring rather than in the model.
+
+**Scope, stated plainly:** this is a 15-question set against a 10-chunk corpus.
+It is enough to catch regressions and to have found three real bugs. It is not
+enough to claim the system generalises, and a bigger corpus is the obvious next
+test.
 
 ---
 
 ## Technical decisions
 
-The reasoning behind each significant choice lives in [`docs/adr/`](docs/adr/).
-Summary:
+Reasoning for each significant choice lives in [`docs/adr/`](docs/adr/).
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Embeddings | ONNX via `fastembed`, not PyTorch | 223 MB vs ~2 GB, verified working on Python 3.13/Windows before anything depended on it — [ADR-0001](docs/adr/0001-embeddings-without-pytorch.md) |
+| Embeddings | ONNX via `fastembed`, not PyTorch | 223 MB vs ~2 GB, verified working on Python 3.13/Windows *before* anything depended on it — [ADR-0001](docs/adr/0001-embeddings-without-pytorch.md) |
 | Embedding location | Local, not a hosted API | No per-query cost on the retrieval path, no second vendor |
-| Retrieval | numpy cosine similarity behind a `Retriever` interface | At this corpus size a vector database is complexity without benefit; the interface keeps the upgrade cheap. **9/10 top-1 on the project corpus, 5.4 ms mean query** |
-| Query encoding | `bge` instruction prefix applied by hand | `fastembed`'s `query_embed()` is byte-identical to `embed()`, so it applies no prefix at all. Adding it moved top-1 from 5/9 to 7/9 — measured, not assumed |
-| Citations | *(planned — M3)* Claude's native citations | Structured source locations, rather than prompting for citations and hoping they are real |
-| Refusal | *(planned — M3)* the model judges the retrieved passages | **Not** a similarity threshold. That was the plan until it was measured: out-of-scope questions do not reliably score lower, because embedding similarity measures topical relatedness rather than answerability. See the row below |
+| Retrieval | numpy cosine similarity behind a `Retriever` interface | At this corpus size a vector database is complexity without benefit; the interface keeps the upgrade cheap |
+| Query encoding | `bge` instruction prefix applied by hand | `fastembed`'s `query_embed()` is byte-identical to `embed()`, so it applies no prefix at all. Adding it measurably improved top-1 |
+| Citations | Claude's native citations, then verified locally | The API cannot cite text it was not sent; the local check means the guarantee lives in this repository rather than in a vendor's feature list |
+| Refusal | The model judges the retrieved passages | **Not** a similarity threshold — that was the plan until it was measured. [ADR-0002](docs/adr/0002-refusal-is-a-judgement-not-a-threshold.md) |
+| Answering model | Claude Haiku 4.5 | Reading four short passages is comprehension, not reasoning. $2.20 per 1,000 questions against $11.00 for the largest model |
 
 ### The measurement that changed the design
 
@@ -80,14 +109,14 @@ ones on this corpus:
 
 *"How do I train my own language model?"* scores 0.755 — higher than seven of the
 ten questions the corpus **can** answer — because it is topically adjacent to a
-document about language models. The ranges overlap by 0.089, so no cutoff exists
-that separates them.
+document about language models. The ranges overlap, so no cutoff exists that
+separates them.
 
-This is a property of the technique rather than a threshold left untuned, so
-refusal has to come from the model reading the retrieved passages and judging
-whether they actually answer the question. A score threshold survives only as a
-cheap pre-filter for the obviously unrelated (*"what is the capital of France?"*
-scores 0.428).
+**Embedding similarity measures topical relatedness, not answerability.** That is
+a property of the technique, not a threshold left untuned, so refusal comes from
+the model reading the passages. A score threshold survives only as a cheap
+pre-filter for the obviously unrelated (*"what is the capital of France?"* scores
+0.428).
 
 ---
 
@@ -95,28 +124,65 @@ scores 0.428).
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+.venv\Scripts\activate            # Windows; use source .venv/bin/activate elsewhere
 pip install -e ".[api,dev]"
-
-copy .env.example .env          # then add your Anthropic API key
 ```
 
-*(Ingestion and query commands land with M1–M3.)*
+Three of the four commands cost nothing and need no API key:
+
+```bash
+doc-assistant index               # what retrieval will see
+doc-assistant index --verbose     # every chunk and its citation
+doc-assistant eval --retrieval-only
+```
+
+For answering, copy `.env.example` to `.env` and add an Anthropic key:
+
+```bash
+doc-assistant ask "What are the four components of a well-formed prompt?"
+doc-assistant eval                # adds answering and refusal scores
+```
+
+Then the web service:
+
+```bash
+uvicorn assistant.api:app --reload
+```
+
+Adding your own documents means dropping `.md`, `.txt`, `.docx` or `.pdf` files
+into `content/`. Subdirectories are read, and citations use the path relative to
+`content/` so two files with the same name stay distinguishable.
 
 ---
 
 ## Repository layout
 
 ```text
-src/assistant/     ingestion, chunking, embeddings, retrieval, answering
-eval/              question set and scoring harness
+src/assistant/     ingestion, chunking, embeddings, retrieval, answering, API
+eval/              the committed question set
 content/           the documents the demo answers from
 docs/adr/          why each decision was made
 ```
 
-`src/assistant/` does not import from the API or UI layer. The core is usable as
-a library on its own — which is what keeps a different deployment a wrapper
-rather than a rewrite.
+`src/assistant/api.py` decides nothing about answers — it owns transport,
+protection and presentation only. The core is usable as a library on its own,
+which is what keeps a different deployment a wrapper rather than a rewrite.
+
+---
+
+## If you deploy this
+
+Read [SECURITY.md](SECURITY.md) first. Two controls are **not optional** and are
+not enforced by this code:
+
+1. **A hard spend cap on the API account.** The service has its own daily
+   ceiling, but that counter resets when the process restarts. Only the
+   provider's cap bounds the loss when something loops.
+2. **Rate limiting at the edge**, in addition to the application's own.
+
+Do not put confidential documents in the corpus of a public deployment. Every
+passage is retrievable by asking the right question — that is what the software
+does.
 
 ---
 

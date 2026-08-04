@@ -32,8 +32,10 @@ You answer questions using only the documents provided in the user turn.
 Rules:
 - Answer only from the supplied documents. Do not use general knowledge, even \
 when you are confident it is correct.
-- If the documents do not contain the answer, say so plainly and stop. Do not \
-offer a partial answer assembled from what is there, and do not speculate.
+- If the documents do not contain the answer, begin your reply with exactly \
+NOT_IN_DOCUMENTS on its own line, then explain in one or two sentences what the \
+documents do cover instead. Citing a passage that shows the scope is welcome. Do \
+not offer a partial answer assembled from what is there, and do not speculate.
 - Every factual claim must be supported by the documents, so that each one \
 carries a citation.
 - Be concise. Answer the question asked, without preamble or a summary of what \
@@ -58,16 +60,28 @@ class Citation:
 class Answer:
     """The result of asking a question.
 
-    `grounded` is the field that matters. An answer with no citations is not
-    presented as an answer, whether the model declined or produced something
-    unsupported: in both cases nothing in the response points at a source, and
-    the user needs to know that rather than be handed prose to trust.
+    `grounded` means: this is an answer, and it has evidence behind it. Both
+    halves are required, and they are measured separately.
+
+    `refused` is reported by the model itself, via a marker it is told to emit.
+    Inferring it from "no citations" was tried first and was wrong: the model
+    would decline *and* cite the passage showing the documents' scope — a
+    perfectly sensible thing to do, since that passage is the evidence for the
+    refusal — and the inference read that as an answer. The first attempt at a
+    fix forbade citing while refusing, which is fighting good behaviour to
+    protect a bad proxy, and it only half worked.
+
+    An explicit marker is a protocol rather than a guess. Matching refusal
+    *wording* would have been the other option, and it breaks the moment the
+    model rephrases itself.
     """
 
     text: str
     citations: tuple[Citation, ...]
     grounded: bool
     results: tuple[SearchResult, ...]
+    refused: bool = False
+    """The model reported that the documents do not contain the answer."""
     rejected_citations: int = 0
     """Citations discarded because the quote was not in the passage we sent.
 
@@ -82,6 +96,12 @@ class Answer:
         """Unique cited sources, in the order the model first used them."""
         return tuple(dict.fromkeys(c.source for c in self.citations))
 
+
+REFUSAL_MARKER = "NOT_IN_DOCUMENTS"
+"""Emitted by the model to declare a refusal explicitly.
+
+A protocol rather than an inference. Stripped before the text is shown.
+"""
 
 NOT_IN_CORPUS = (
     "That is not covered in these documents, so I cannot answer it from them."
@@ -222,11 +242,23 @@ class Answerer:
                 )
 
         text = "".join(parts).strip()
+
+        # The marker is a protocol between the prompt and this parser, not
+        # something a reader should ever see. Stripped here so the refusal reads
+        # as ordinary prose.
+        refused = text.startswith(REFUSAL_MARKER)
+        if refused:
+            text = text[len(REFUSAL_MARKER) :].strip()
+
         return Answer(
             text=text or NOT_IN_CORPUS,
             citations=tuple(citations),
-            grounded=bool(citations),
+            # An answer needs both halves: it must not be a refusal, and it must
+            # have evidence. A refusal that cites its scope passage is still a
+            # refusal, and an unsupported claim is still unsupported.
+            grounded=bool(citations) and not refused,
             results=tuple(results),
+            refused=refused,
             rejected_citations=rejected,
         )
 

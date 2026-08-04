@@ -135,6 +135,26 @@ def cmd_eval(args: argparse.Namespace) -> int:
     print("                  answerable questions wrongly refused")
     print(f"  bad citations   {answers.unverifiable_citations}")
     print("                  quotes not present in the passage we sent")
+
+    # An aggregate score without the failing case is decorative: it tells you
+    # something is wrong and gives you no way to act on it. The failures are the
+    # only part of a run worth reading twice.
+    failures = [o for o in answers.outcomes if not o.correct]
+    if failures:
+        print(f"\n  {len(failures)} failure(s):")
+        for outcome in failures:
+            kind = (
+                "answered a question the corpus cannot answer"
+                if not outcome.question.answerable
+                else "refused"
+                if not outcome.grounded
+                else "cited the wrong section"
+            )
+            print(f"\n    {outcome.question.text}")
+            print(f"      problem  {kind}")
+            if outcome.question.expects:
+                print(f"      wanted   {outcome.question.expects}")
+            print(f"      said     {outcome.text[:160]}")
     return 0
 
 

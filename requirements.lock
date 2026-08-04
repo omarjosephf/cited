@@ -1,0 +1,100 @@
+# Pinned dependency set — for reproducible deployment, not for CI.
+#
+# Generated with `pip freeze` from a known-good environment. Every version here
+# is one this project has actually been run and tested against.
+#
+# WHAT THIS GUARANTEES
+#   The same versions install every time. That is what makes a deployment
+#   reproducible: a container built today and rebuilt in six months resolves to
+#   the same packages rather than to whatever has since been released.
+#
+# WHAT IT DOES NOT GUARANTEE
+#   Integrity. These are version pins, not hashes, so they do not prove a
+#   package on the index is the same artefact that was tested. Hash pinning
+#   needs `pip-compile --generate-hashes`; it is worth adding before this
+#   handles anything of consequence, and is not worth pretending is already
+#   here.
+#
+# WHY CI DOES NOT USE THIS FILE
+#   Deliberate. CI installs from the ranges in pyproject.toml, so it resolves
+#   the newest compatible versions on every run. That is a different and more
+#   useful signal: it catches an upstream release breaking this project within
+#   a day, rather than the first time someone regenerates the lock. Pinning CI
+#   would trade an early warning for a quieter build.
+#
+#   Use this file where reproducibility matters more than early warning:
+#       pip install -r requirements.lock
+#
+# REGENERATING
+#   pip install -e ".[api,dev]" && pip freeze --exclude-editable > requirements.lock
+#   Then re-add the sys_platform marker below — pip freeze does not emit
+#   environment markers, so a Windows-only package would otherwise make this
+#   file uninstallable on Linux.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==0.120.2
+anyio==4.14.2
+ast_serialize==0.6.0
+certifi==2026.7.22
+charset-normalizer==3.4.9
+click==8.4.2
+colorama==0.4.6
+coverage==7.15.3
+Deprecated==1.3.1
+distro==1.9.0
+docstring_parser==0.18.0
+fastapi==0.141.1
+fastembed==0.8.0
+filelock==3.32.2
+flatbuffers==25.12.19
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.5.2
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+huggingface_hub==1.26.0
+idna==3.18
+iniconfig==2.3.0
+jiter==0.16.0
+librt==0.13.0
+limits==5.8.0
+loguru==0.7.3
+lxml==6.1.1
+mmh3==5.2.1
+mypy==2.3.0
+mypy_extensions==1.1.0
+numpy==2.5.1
+onnxruntime==1.28.0
+packaging==26.2
+pathspec==1.1.1
+pillow==12.3.0
+pluggy==1.6.0
+protobuf==7.35.1
+py_rust_stemmers==0.1.8
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+Pygments==2.20.0
+pypdf==6.14.2
+pytest==9.1.1
+pytest-cov==7.1.0
+python-docx==1.2.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+requests==2.34.2
+ruff==0.16.1
+slowapi==0.1.10
+sniffio==1.3.1
+starlette==1.3.1
+tokenizers==0.23.1
+tqdm==4.70.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+urllib3==2.7.0
+uvicorn==0.52.1
+watchfiles==1.2.0
+websockets==17.0.1
+win32_setctime==1.2.0 ; sys_platform == "win32"
+wrapt==2.3.0
+

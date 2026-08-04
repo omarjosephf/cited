@@ -1,0 +1,93 @@
+name: CI
+
+# Runs on every push and pull request. The point is not the green tick — it is
+# that the checks run somewhere other than the machine they were written on.
+# "Works on mine" is the failure mode this exists to catch.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# Read-only by default. A workflow that only runs tests has no business being
+# able to write to the repository, and the narrowest permission that works is
+# the right one.
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded run tells you nothing you will act on. Cancelling saves minutes
+  # and keeps the visible status pointing at the current commit.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches `requires-python = ">=3.12"`. Pinned rather than "latest"
+          # so a new Python release cannot turn a passing build red overnight
+          # for reasons unrelated to any change made here.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api,dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format
+        run: ruff format --check .
+
+      - name: Types
+        run: mypy src tests
+
+      - name: Tests
+        # No ANTHROPIC_API_KEY is set, deliberately. Every test must pass
+        # without one: the suite uses a test double for the Anthropic client,
+        # so a test that needs a live key is a test that cannot run here — and
+        # a suite that only runs on one laptop is not a suite.
+        run: pytest -q
+
+      - name: Retrieval evaluation
+        # The half of the evaluation that costs nothing. Retrieval is the layer
+        # that fails first and silently, so it is worth checking on every commit
+        # rather than only when someone remembers to run it locally.
+        run: doc-assistant eval --retrieval-only
+
+  # Deliberately a separate job. A secret reaching a tracked file is not a test
+  # failure like any other — it is the one failure that cannot be undone by
+  # fixing the next commit, because the credential must then be treated as
+  # compromised whether or not anyone read it. Isolating it means the reason a
+  # build went red is unambiguous.
+  secrets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The guard scans tracked files at this commit. Full history would be
+          # a different and much slower check; this catches the mistake at the
+          # point it is still cheap to fix.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: No credentials in tracked files
+        run: pytest tests/test_no_secrets_committed.py -q

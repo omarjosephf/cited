@@ -112,6 +112,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
     )
     _print_retrieval(report)
 
+    if args.retrieval_only:
+        print("\nAnswering")
+        print("  skipped: --retrieval-only")
+        return 0
+
     settings = Settings()
     if not settings.answering_enabled:
         print("\nAnswering")
@@ -209,6 +214,15 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = subcommands.add_parser("eval", help="score against the question set")
     evaluate.add_argument("--questions", type=Path, default=None)
     evaluate.add_argument("--top-k", type=int, default=4)
+    evaluate.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help=(
+            "score retrieval and stop, making no paid calls. Explicit rather "
+            "than relying on the absence of a key: CI must fail if a key leaks "
+            "into its environment, not quietly start spending money."
+        ),
+    )
     evaluate.set_defaults(func=cmd_eval)
 
     ask = subcommands.add_parser("ask", help="answer one question (costs an API call)")

@@ -11,6 +11,7 @@ paths are the ones least likely to be exercised by hand.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -239,3 +240,106 @@ class TestPage:
         for dangerous in ("innerHTML =", "innerHTML=", "outerHTML =", "document.write"):
             assert dangerous not in page, f"page uses {dangerous}"
         assert "textContent" in page, "expected text to be inserted safely"
+
+
+class TestSecurityHeaders:
+    """Headers the first deployment shipped without.
+
+    Every functional check passed against the live service and the response
+    carried no HSTS, no CSP, no nosniff and no frame protection — none of which
+    breaks anything, which is exactly why nothing noticed. A header that is
+    absent looks identical to a header that is working.
+    """
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("Strict-Transport-Security", "max-age=63072000; includeSubDomains"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("X-Frame-Options", "DENY"),
+            ("Referrer-Policy", "strict-origin-when-cross-origin"),
+        ],
+    )
+    def test_the_page_carries_them(
+        self, client: TestClient, header: str, expected: str
+    ) -> None:
+        assert client.get("/").headers[header] == expected
+
+    @pytest.mark.parametrize("path", ["/", "/health"])
+    def test_json_routes_carry_them_too(self, client: TestClient, path: str) -> None:
+        """Not just the HTML. An API response can be navigated to directly."""
+        assert client.get(path).headers["X-Content-Type-Options"] == "nosniff"
+
+    def test_even_a_rejected_request_carries_them(self, client: TestClient) -> None:
+        """422s and 429s are written by the framework, not by us.
+
+        Setting headers per route would silently miss every response we did not
+        write ourselves, which is most of the error cases.
+        """
+        response = client.post("/ask", json={"question": "a" * 600})
+
+        assert response.status_code == 422
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+
+    def test_the_policy_denies_by_default(self, client: TestClient) -> None:
+        policy = client.get("/").headers["Content-Security-Policy"]
+
+        assert "default-src 'none'" in policy
+        for directive in (
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'none'",
+            "upgrade-insecure-requests",
+        ):
+            assert directive in policy, f"missing {directive}"
+
+    def test_the_policy_never_allows_unsafe_inline(self, client: TestClient) -> None:
+        """The reason the nonce exists.
+
+        'unsafe-inline' would authorise the page's own script *and* anything
+        later injected into the markup — the precise attack CSP is for.
+        """
+        policy = client.get("/").headers["Content-Security-Policy"]
+
+        assert "unsafe-inline" not in policy
+        assert "unsafe-eval" not in policy
+
+    def test_the_nonce_in_the_header_matches_the_one_in_the_markup(
+        self, client: TestClient
+    ) -> None:
+        """A mismatch does not error, it silently blocks the page's own script.
+
+        The UI would render and then do nothing when you pressed the button.
+        """
+        response = client.get("/")
+        nonce = re.search(
+            r"'nonce-([^']+)'", response.headers["Content-Security-Policy"]
+        )
+
+        assert nonce, "no nonce in the policy"
+        assert response.text.count(f'nonce="{nonce.group(1)}"') == 2, (
+            "both the inline <style> and the inline <script> must carry it"
+        )
+
+    def test_a_fresh_nonce_is_issued_per_response(self, client: TestClient) -> None:
+        """A reused nonce is worth no more than 'unsafe-inline'.
+
+        If it were constant, an attacker who read the page once could put the
+        value on their own injected script and be authorised by it.
+        """
+        nonces = {
+            re.search(  # type: ignore[union-attr]
+                r"'nonce-([^']+)'", client.get("/").headers["Content-Security-Policy"]
+            ).group(1)
+            for _ in range(5)
+        }
+
+        assert len(nonces) == 5, f"nonce repeated across responses: {nonces}"
+
+    def test_no_placeholder_survives_into_the_response(
+        self, client: TestClient
+    ) -> None:
+        """A missed substitution ships the literal marker as the nonce."""
+        assert api.NONCE_PLACEHOLDER not in client.get("/").text

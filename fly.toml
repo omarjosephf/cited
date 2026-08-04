@@ -2,6 +2,22 @@
 #
 # The app name is set by `fly launch` and must be globally unique; change it
 # there rather than guessing one here.
+#
+# DEPLOY WITH:
+#     fly deploy --remote-only --ha=false
+#
+# `--ha=false` is not optional here, and there is no fly.toml setting for it.
+# Without it Fly helpfully creates a *second* machine for high availability,
+# which it did on the first deploy of this app.
+#
+# For a stateless web service that would be a good default. This service is not
+# stateless: the daily answer budget is a counter in the process's own memory
+# (see assistant/budget.py). A second machine runs a second process with a
+# second counter, so a limit of 200 answers a day silently permits 400 — and
+# doubles the monthly bill for a demo that needs one machine.
+#
+# `--remote-only` builds on Fly's builder, which is what makes a deploy possible
+# from a machine with no Docker installed.
 
 app = "cited-demo"
 primary_region = "lhr"          # London: nearest to the author and to UK readers

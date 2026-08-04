@@ -16,6 +16,7 @@ three and none of them substitutes for another:
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -189,10 +190,81 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     )
 
 
+SECURITY_HEADERS = {
+    # Two years, because a shorter max-age leaves a window where a downgrade
+    # attack still works. Fly terminates TLS and redirects, but a header is what
+    # stops the *first* request going out over HTTP next time.
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+    # Without this a response the browser thinks might be script is treated as
+    # script. Cheap, and there is no case where sniffing helps us.
+    "X-Content-Type-Options": "nosniff",
+    # Legacy twin of frame-ancestors, for anything that predates CSP.
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    # Nothing here uses any of these, so none should be reachable.
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()",
+}
+
+NONCE_PLACEHOLDER = "__CSP_NONCE__"
+"""Substituted per response. A marker in the markup, never a real value."""
+
+
+def _csp(nonce: str | None) -> str:
+    """The policy, tightened as far as this page allows.
+
+    `default-src 'none'` rather than `'self'`: the deny-by-default version means
+    a directive that is missing fails closed. Every source below is one this
+    page provably needs.
+
+    The inline <style> and <script> carry a per-request nonce instead of
+    'unsafe-inline'. They are the page's own code, but 'unsafe-inline' would
+    also authorise anything injected into the markup later, which is the exact
+    attack CSP exists to stop.
+    """
+    script = f"'nonce-{nonce}'" if nonce else "'none'"
+    style = f"'nonce-{nonce}'" if nonce else "'none'"
+    return "; ".join(
+        [
+            "default-src 'none'",
+            f"script-src {script}",
+            f"style-src {style}",
+            # The page posts to /ask on its own origin and nowhere else.
+            "connect-src 'self'",
+            "img-src 'self' data:",
+            "base-uri 'none'",
+            "form-action 'none'",
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "upgrade-insecure-requests",
+        ]
+    )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next: Any) -> Any:
+    """Applied to every response, including errors and rate-limit rejections.
+
+    Set here rather than per route because the responses most likely to be
+    forgotten — a 429, a 422, a 500 — are the ones written by the framework
+    rather than by us.
+    """
+    response = await call_next(request)
+    for header, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    # The HTML route sets its own policy carrying that response's nonce; a
+    # nonce reused across responses is no better than no nonce at all.
+    response.headers.setdefault("Content-Security-Policy", _csp(None))
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     page = Path(__file__).parent / "static" / "index.html"
-    return HTMLResponse(page.read_text(encoding="utf-8"))
+    # A fresh nonce per response, from the CSPRNG. `token_urlsafe` is base64url,
+    # which is already valid inside a CSP source expression.
+    nonce = secrets.token_urlsafe(16)
+    html = page.read_text(encoding="utf-8").replace(NONCE_PLACEHOLDER, nonce)
+    return HTMLResponse(html, headers={"Content-Security-Policy": _csp(nonce)})
 
 
 @app.exception_handler(500)

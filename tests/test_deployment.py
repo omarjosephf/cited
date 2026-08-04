@@ -160,6 +160,21 @@ class TestPlatformConfigAgreesWithTheImage:
             "the intent"
         )
 
+    def test_the_ha_trap_is_documented(self) -> None:
+        """Fly adds a second machine unless a deploy flag says otherwise.
+
+        There is no fly.toml setting for it, so the only thing that can carry
+        this warning is the file a person reads before deploying. It happened on
+        the first deploy of this app: two machines, two budget counters, a 200/day
+        limit that permitted 400, and double the bill.
+        """
+        config = (REPO / "fly.toml").read_text(encoding="utf-8")
+
+        assert "--ha=false" in config, (
+            "the deploy command must be recorded here; nothing else prevents a "
+            "second machine from silently doubling the spend ceiling"
+        )
+
     def test_the_memory_tier_has_headroom_over_what_was_measured(
         self, fly: dict[str, Any]
     ) -> None:

@@ -46,9 +46,15 @@ class Passage:
 
 
 class Reader(Protocol):
-    """Reads one file format into passages."""
+    """Reads one file format into passages.
 
-    def read(self, path: Path) -> list[Passage]: ...
+    `source` is passed in rather than taken from the path because it is the
+    label that appears in citations. When a corpus has subdirectories it must be
+    the path relative to the corpus root, so that `api/guide.md` and
+    `legal/guide.md` do not both cite as "guide.md".
+    """
+
+    def read(self, path: Path, source: str) -> list[Passage]: ...
 
 
 # Collapse runs of whitespace but keep the text otherwise intact. Aggressive
@@ -71,8 +77,7 @@ class MarkdownReader:
 
     _HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 
-    def read(self, path: Path) -> list[Passage]:
-        source = path.name
+    def read(self, path: Path, source: str) -> list[Passage]:
         passages: list[Passage] = []
         section: str | None = None
         buffer: list[str] = []
@@ -109,11 +114,10 @@ class DocxReader:
     names, which is the provenance this format actually offers.
     """
 
-    def read(self, path: Path) -> list[Passage]:
+    def read(self, path: Path, source: str) -> list[Passage]:
         import docx  # imported lazily: only needed when a .docx is encountered
 
         document = docx.Document(str(path))
-        source = path.name
         passages: list[Passage] = []
         section: str | None = None
 
@@ -139,11 +143,10 @@ class PdfReader:
     what the reader sees, not the 0-indexed value the library returns.
     """
 
-    def read(self, path: Path) -> list[Passage]:
+    def read(self, path: Path, source: str) -> list[Passage]:
         from pypdf import PdfReader as _PdfReader  # lazy: see DocxReader
 
         reader = _PdfReader(str(path))
-        source = path.name
         passages: list[Passage] = []
 
         for index, page in enumerate(reader.pages, start=1):
@@ -170,15 +173,20 @@ class UnsupportedDocument(ValueError):
     """Raised for a file extension no reader handles."""
 
 
-def read_document(path: Path) -> list[Passage]:
-    """Read one file into passages, or raise if the format is unsupported."""
+def read_document(path: Path, source: str | None = None) -> list[Passage]:
+    """Read one file into passages, or raise if the format is unsupported.
+
+    `source` overrides the citation label, which `read_corpus` uses to pass a
+    path relative to the corpus root. It defaults to the filename, which is
+    correct when reading a single document on its own.
+    """
     reader = _READERS.get(path.suffix.lower())
     if reader is None:
         supported = ", ".join(sorted(SUPPORTED_SUFFIXES))
         raise UnsupportedDocument(
             f"{path.name}: no reader for '{path.suffix}' (supported: {supported})"
         )
-    return reader.read(path)
+    return reader.read(path, source or path.name)
 
 
 def is_corpus_document(path: Path) -> bool:
@@ -200,14 +208,29 @@ def is_corpus_document(path: Path) -> bool:
 
 
 def read_corpus(directory: Path) -> list[Passage]:
-    """Read every corpus document in a directory, sorted for reproducibility.
+    """Read every corpus document beneath a directory, sorted for reproducibility.
 
-    Non-content files are skipped rather than fatal — a corpus folder will
-    accumulate a README, a stray image, an editor backup — but a *supported*
-    content file that fails to parse is a real problem and is allowed to raise.
+    **Recurses.** A document in `content/policies/` used to be skipped in
+    silence: no error, no warning, it simply never appeared in an answer — and
+    the only symptom was the assistant claiming not to know something it had
+    been given.
+
+    Recursion makes filenames ambiguous, so the citation label becomes the path
+    relative to this directory. Without that, `api/guide.md` and `legal/guide.md`
+    would both cite as "guide.md", and a reader following the citation would open
+    the wrong document — the precise misattribution this project exists to
+    prevent.
+
+    Non-content files are skipped rather than fatal: a corpus folder accumulates
+    a README, a stray image, an editor backup. A *supported* content file that
+    fails to parse is a real problem and is allowed to raise.
     """
     passages: list[Passage] = []
-    for path in sorted(directory.iterdir()):
-        if is_corpus_document(path):
-            passages.extend(read_document(path))
+    for path in sorted(directory.rglob("*")):
+        if not is_corpus_document(path):
+            continue
+        # POSIX separators so a citation reads the same on every platform;
+        # a Windows-generated index should not cite "api\guide.md".
+        source = path.relative_to(directory).as_posix()
+        passages.extend(read_document(path, source))
     return passages

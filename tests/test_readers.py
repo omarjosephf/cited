@@ -177,6 +177,74 @@ def test_is_corpus_document_rejects_directories(tmp_path: Path) -> None:
     assert not is_corpus_document(tmp_path / "subfolder.md")
 
 
+class TestRecursion:
+    """A document in a subdirectory used to vanish without any error."""
+
+    def test_documents_in_subdirectories_are_read(self, tmp_path: Path) -> None:
+        (tmp_path / "policies").mkdir()
+        (tmp_path / "top.md").write_text("# T\n\nTop level.\n", encoding="utf-8")
+        (tmp_path / "policies" / "nested.md").write_text(
+            "# N\n\nNested content.\n", encoding="utf-8"
+        )
+
+        sources = {p.source for p in read_corpus(tmp_path)}
+
+        assert sources == {"top.md", "policies/nested.md"}
+
+    def test_nested_citations_use_the_relative_path(self, tmp_path: Path) -> None:
+        """Otherwise two files with the same name cite identically."""
+        (tmp_path / "api").mkdir()
+        (tmp_path / "api" / "guide.md").write_text(
+            "# Setup\n\nApi guide body.\n", encoding="utf-8"
+        )
+
+        passage = read_corpus(tmp_path)[0]
+
+        assert passage.source == "api/guide.md"
+        assert passage.cite() == "api/guide.md — Setup"
+
+    def test_same_filename_in_two_folders_stays_distinguishable(
+        self, tmp_path: Path
+    ) -> None:
+        """The misattribution case: a reader following the citation must land
+        on the document the claim actually came from."""
+        for folder in ("api", "legal"):
+            (tmp_path / folder).mkdir()
+            (tmp_path / folder / "guide.md").write_text(
+                f"# H\n\nBody of the {folder} guide.\n", encoding="utf-8"
+            )
+
+        sources = {p.source for p in read_corpus(tmp_path)}
+
+        assert sources == {"api/guide.md", "legal/guide.md"}
+        assert len(sources) == 2, "identical citations would misattribute quotes"
+
+    def test_separators_are_posix_on_every_platform(self, tmp_path: Path) -> None:
+        """A Windows-built index must not cite `api\\guide.md`."""
+        (tmp_path / "api").mkdir()
+        (tmp_path / "api" / "g.md").write_text("# H\n\nBody.\n", encoding="utf-8")
+
+        assert "\\" not in read_corpus(tmp_path)[0].source
+
+    def test_exclusion_rules_still_apply_inside_subdirectories(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "README.md").write_text("# R\n\nAbout.\n", "utf-8")
+        (tmp_path / "notes" / "_draft.md").write_text("# D\n\nWip.\n", "utf-8")
+        (tmp_path / "notes" / "real.md").write_text("# T\n\nContent.\n", "utf-8")
+
+        assert {p.source for p in read_corpus(tmp_path)} == {"notes/real.md"}
+
+    def test_reading_one_document_directly_still_uses_its_filename(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "solo.md"
+        path.write_text("# H\n\nBody.\n", encoding="utf-8")
+
+        assert read_document(path)[0].source == "solo.md"
+
+
 def test_corpus_order_is_deterministic(tmp_path: Path) -> None:
     for name in ["c.md", "a.md", "b.md"]:
         (tmp_path / name).write_text(f"# {name}\n\nBody of {name}.\n", encoding="utf-8")

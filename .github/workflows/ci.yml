@@ -61,7 +61,7 @@ jobs:
         # The half of the evaluation that costs nothing. Retrieval is the layer
         # that fails first and silently, so it is worth checking on every commit
         # rather than only when someone remembers to run it locally.
-        run: doc-assistant eval --retrieval-only
+        run: doc-assistant eval
 
   # Deliberately a separate job. A secret reaching a tracked file is not a test
   # failure like any other — it is the one failure that cannot be undone by

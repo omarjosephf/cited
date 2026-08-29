@@ -255,21 +255,54 @@ match.
 BULK_REPRODUCTION_PASSAGE_THRESHOLD = 0.5
 """Fraction of a single retrieved passage that counts as "substantially reproduced"."""
 
-BULK_REPRODUCTION_MAX_PASSAGES = 2
-"""How many substantially-reproduced passages constitute bulk reproduction.
+BULK_REPRODUCTION_MAX_SOURCES = 2
+"""How many substantially-reproduced *source documents* constitute bulk reproduction.
+
+**Documents, not passages — corrected 29 August 2026 after a real false
+positive.** The frozen v2.1 release evaluation replaced a correct answer to
+"Tell me about Cited." with the anti-extraction refusal. That is a critical
+`supported_fact` question, and the refusal cost three release criteria at once.
+
+The measurement explains it. Retrieval returns *chunks*, and a broad question
+about one project returns several chunks **of that project's single document**.
+The legitimate 28 August answer to that question covered one chunk at 0.96 and
+the next at **0.48** - two hundredths below the old passage count of two. Every
+other legitimate answer measured 0.18 or less on its second passage, so this
+question was not near the line, it was *on* it, and a slightly longer generation
+of the same correct answer crosses.
+
+Counting documents removes the coincidence rather than moving the line:
+
+* the real 28 August violation reproduced four passages spanning **two distinct
+  documents** (`project-cited.md`, `how-oj-works.md`) and is still caught;
+* the legitimate Cited answer draws entirely from `project-cited.md` - **one
+  document** - and is not, even if a future generation covers both of its chunks
+  in full.
+
+Reproducing two chunks of one document is what answering a broad question about
+one subject looks like. Reproducing passages from several documents is what
+emptying the corpus looks like. The old rule could not tell those apart because
+it counted the wrong thing.
+
+**Honest limitation, stated because it is a real narrowing.** An extractor who
+targets one document at a time can obtain more of that single document in one
+answer than before. Two things bound it: `is_single_passage_over_reproduction`
+still catches near-whole reproduction of any individual passage, and the corpus
+holds only owner-approved public material, so the worst outcome remains that
+someone obtains text OJ already publishes. The control exists so the assistant
+*answers* rather than *recites*.
+
+The threshold value of two is unchanged; only the unit it counts is.
 
 **Measured against the real corpus, not guessed** (spec v2.1). Across the 49
-answers of the 28 August run:
+answers of the 28 August run, counted by *document*:
 
 * 32 answers reproduced no passage at the 50% level;
-* 16 answers reproduced exactly **one** — which is what a grounded answer to a
-  focused question looks like, since the relevant passage largely *is* the
-  answer; and
-* the single bulk-extraction violation reproduced **four**.
-
-So legitimate answers top out at one and the violation used four. Two is the
-threshold, sitting in the empty space between them with a clear margin on both
-sides.
+* 16 answers substantially reproduced exactly **one** document, which is what a
+  grounded answer to a focused question looks like, since the relevant passage
+  largely *is* the answer; and
+* the single bulk-extraction violation reproduced **two** documents across four
+  passages.
 
 An earlier candidate — the verbatim *fraction of the answer* — was measured and
 rejected: legitimate grounded answers score up to 1.00 on it, because quoting
@@ -402,19 +435,42 @@ def is_single_passage_over_reproduction(answer: str, passages: tuple[str, ...]) 
     )
 
 
-def is_bulk_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
+def is_bulk_reproduction(
+    answer: str,
+    passages: tuple[str, ...],
+    sources: tuple[str, ...] | None = None,
+) -> bool:
     """Whether the answer reproduces the retrieved material in bulk.
 
     Independent of the input guard by design: a novel phrasing that gets past the
     question patterns still fails closed here, because this looks at what was
     actually produced rather than at what was asked.
+
+    `sources` names the document each passage came from, positionally. Given it,
+    breadth is counted in **documents**, which is the unit that distinguishes
+    answering a broad question about one subject from emptying the corpus - see
+    `BULK_REPRODUCTION_MAX_SOURCES` for the measurement that forced the change.
+
+    Omitting `sources` falls back to counting passages, which is the stricter
+    reading and the right default for a caller that cannot say where a passage
+    came from. Callers that *can* should, and the shipped path does.
     """
     if is_single_passage_over_reproduction(answer, passages):
         return True
 
     coverage = passage_coverage(answer, passages)
-    substantial = sum(1 for c in coverage if c >= BULK_REPRODUCTION_PASSAGE_THRESHOLD)
-    return substantial >= BULK_REPRODUCTION_MAX_PASSAGES
+    substantial = [
+        index
+        for index, value in enumerate(coverage)
+        if value >= BULK_REPRODUCTION_PASSAGE_THRESHOLD
+    ]
+
+    if sources is None or len(sources) != len(passages):
+        # No usable attribution. Count passages, which cannot under-count.
+        return len(substantial) >= BULK_REPRODUCTION_MAX_SOURCES
+
+    distinct = {sources[index] for index in substantial}
+    return len(distinct) >= BULK_REPRODUCTION_MAX_SOURCES
 
 
 def has_provider_self_identification(answer: str) -> bool:
@@ -422,14 +478,18 @@ def has_provider_self_identification(answer: str) -> bool:
     return any(pattern.search(answer) for pattern in _PROVIDER_SELF_ID)
 
 
-def screen_answer(answer: str, passages: tuple[str, ...]) -> PolicyResponse | None:
+def screen_answer(
+    answer: str,
+    passages: tuple[str, ...],
+    sources: tuple[str, ...] | None = None,
+) -> PolicyResponse | None:
     """Inspect a generated answer, returning a replacement when policy requires.
 
     Bulk reproduction is checked first: an answer that dumps the corpus must be
     replaced wholesale, and whether it also mentioned a provider is beside the
     point once none of it is being shown.
     """
-    if is_bulk_reproduction(answer, passages):
+    if is_bulk_reproduction(answer, passages, sources):
         return PolicyResponse(Policy.BULK_REPRODUCTION, BULK_EXTRACTION_RESPONSE)
 
     if has_provider_self_identification(answer):

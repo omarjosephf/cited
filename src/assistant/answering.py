@@ -238,7 +238,11 @@ class Answerer:
         # proof: a phrasing it does not recognise still has to fail closed, and
         # only the generated text can show that.
         passages = tuple(result.chunk.text for result in results)
-        replacement = screen_answer(answer.text, passages)
+        # Attribution matters here: breadth is counted in documents, not chunks,
+        # so that a broad question about one project cannot be mistaken for an
+        # attempt to empty the corpus. See BULK_REPRODUCTION_MAX_SOURCES.
+        sources = tuple(result.chunk.source for result in results)
+        replacement = screen_answer(answer.text, passages, sources)
         if replacement is not None:
             return self._policy_answer(
                 replacement,

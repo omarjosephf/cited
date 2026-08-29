@@ -229,6 +229,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         PaidRunAuthorisation(
             max_paid_calls=args.max_paid_calls, reason=args.reason or ""
         ),
+        # The same object the ceiling is enforced against, so the reported
+        # figure and the enforced figure cannot disagree.
+        call_counter=budgeted,
     )
 
     print("")

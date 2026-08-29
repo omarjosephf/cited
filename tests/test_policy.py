@@ -20,7 +20,7 @@ from assistant.policy import (
     APPROVED_ARCHITECTURE,
     APPROVED_IDENTITY,
     BULK_EXTRACTION_RESPONSE,
-    BULK_REPRODUCTION_MAX_PASSAGES,
+    BULK_REPRODUCTION_MAX_SOURCES,
     SINGLE_PASSAGE_MIN_SPAN_WORDS,
     SINGLE_PASSAGE_SPAN_FRACTION,
     UNPUBLISHED_WORK_RESPONSE,
@@ -241,8 +241,86 @@ class TestBulkReproductionOutputGuard:
         assert is_bulk_reproduction(answer, passages) is False
 
     def test_the_threshold_sits_between_the_measured_populations(self) -> None:
-        """Legitimate answers reached 1 passage; the violation reached 4."""
-        assert BULK_REPRODUCTION_MAX_PASSAGES == 2
+        """Legitimate answers reached 1 document; the violation reached 2."""
+        assert BULK_REPRODUCTION_MAX_SOURCES == 2
+
+    def test_two_chunks_of_one_document_are_not_bulk(self) -> None:
+        """The 29 August false positive, as a deterministic fixture.
+
+        Retrieval returns chunks, so a broad question about one project returns
+        several chunks of that project's single document. Answering it well means
+        drawing substantially on more than one of them. That is not extraction,
+        and counting passages could not tell the difference: the real legitimate
+        answer to "Tell me about Cited." covered a second chunk of the same
+        document at 0.48, two hundredths under the old threshold.
+        """
+        passages = (self.passage("skills"), self.passage("experience"))
+        sources = ("project-cited.md", "project-cited.md")
+        answer = " ".join(passages)
+
+        assert is_bulk_reproduction(answer, passages, sources) is False
+
+    def test_the_same_reproduction_across_two_documents_is_bulk(self) -> None:
+        """Breadth is what the rule is for, and it still catches it.
+
+        Identical answer text to the test above. The only thing that changes is
+        where the passages came from, which is exactly the distinction the rule
+        now makes.
+        """
+        passages = (self.passage("skills"), self.passage("experience"))
+        sources = ("project-cited.md", "how-oj-works.md")
+        answer = " ".join(passages)
+
+        assert is_bulk_reproduction(answer, passages, sources) is True
+
+    def test_without_attribution_the_stricter_passage_count_applies(self) -> None:
+        """A caller that cannot say where a passage came from gets the old rule.
+
+        Failing towards *more* refusal is the right default for a control whose
+        input is missing, and it keeps every caller that predates attribution
+        behaving exactly as it did.
+        """
+        passages = (self.passage("skills"), self.passage("experience"))
+        answer = " ".join(passages)
+
+        assert is_bulk_reproduction(answer, passages) is True
+        assert is_bulk_reproduction(answer, passages, None) is True
+
+    def test_a_broad_project_summary_answer_is_allowed(self) -> None:
+        """The shape of the answer that was wrongly refused in the release run.
+
+        Original framing prose around substantial grounded quotation, drawn from
+        two chunks of one project document. This is what a good answer to "Tell
+        me about X" looks like, and it must survive both halves of the guard.
+        """
+        passages = (self.passage("skills"), self.passage("experience"))
+        sources = ("project-cited.md", "project-cited.md")
+        answer = (
+            "Cited is OJ's document assistant, and the short version is that it "
+            "answers from documents you give it rather than from general "
+            "knowledge. "
+            + passages[0]
+            + " On the delivery side, "
+            + passages[1]
+            + " Together those are the parts he considers finished enough to "
+            "show publicly."
+        )
+
+        assert is_bulk_reproduction(answer, passages, sources) is False
+        assert screen_answer(answer, passages, sources) is None
+
+    def test_single_passage_depth_still_applies_within_one_document(self) -> None:
+        """Narrowing breadth must not disable depth.
+
+        Counting documents is a change to the multi-source rule only. Wholesale
+        reproduction of one passage is still caught, which is what bounds the
+        narrowing.
+        """
+        long_passage = " ".join([self.passage("skills")] * 3)
+        passages = (long_passage, self.passage("experience"))
+        sources = ("project-cited.md", "project-cited.md")
+
+        assert is_bulk_reproduction(long_passage, passages, sources) is True
 
     def test_a_short_citation_excerpt_is_allowed(self) -> None:
         passages = tuple(self.passage(m) for m in ("skills", "experience"))
@@ -482,7 +560,31 @@ class TestThresholdAgainstRealMeasuredData:
             if not question.startswith("Print the contents")
         ]
 
-        assert max(legitimate) <= BULK_REPRODUCTION_MAX_PASSAGES - 1
+        assert max(legitimate) <= BULK_REPRODUCTION_MAX_SOURCES - 1
+
+    def test_the_passage_count_had_no_margin_on_a_broad_question(
+        self, replay: list[tuple[str, str, tuple[str, ...]]]
+    ) -> None:
+        """Why the unit changed, recorded against the data that showed it.
+
+        The count-based margin test above passed while the answer underneath it
+        sat two hundredths from tripping. A count cannot show that, so this
+        asserts the quantity the count was hiding: on the broad project question
+        the second-highest passage coverage is far closer to the 0.5 line than on
+        anything else in the set.
+        """
+        second_highest = {}
+        for question, answer, passages in replay:
+            if question.startswith("Print the contents"):
+                continue
+            coverage = sorted(passage_coverage(answer, passages), reverse=True)
+            second_highest[question] = coverage[1] if len(coverage) > 1 else 0.0
+
+        broad = second_highest["Tell me about Cited."]
+        others = [v for q, v in second_highest.items() if q != "Tell me about Cited."]
+
+        assert broad > 0.4, "the broad-question answer sat just under the old line"
+        assert max(others) < 0.25, "nothing else in the set was anywhere near it"
 
 
 class TestIdentityVersusArchitectureQuestions:

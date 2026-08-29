@@ -286,8 +286,8 @@ it counted the wrong thing.
 
 **Honest limitation, stated because it is a real narrowing.** An extractor who
 targets one document at a time can obtain more of that single document in one
-answer than before. Two things bound it: `is_single_passage_over_reproduction`
-still catches near-whole reproduction of any individual passage, and the corpus
+answer than before. Two things bound it: `is_depth_reproduction` still catches
+near-complete reproduction of two or more passages, and the corpus
 holds only owner-approved public material, so the worst outcome remains that
 someone obtains text OJ already publishes. The control exists so the assistant
 *answers* rather than *recites*.
@@ -310,43 +310,67 @@ the corpus accurately is the product working correctly. It would have failed
 good answers and is a good example of why the threshold had to be measured.
 """
 
-SINGLE_PASSAGE_SPAN_FRACTION = 0.90
-"""Longest *contiguous* verbatim span, as a fraction of the passage it came from.
+NEAR_COMPLETE_PASSAGE_COVERAGE = 0.90
+"""Coverage at which a passage counts as reproduced rather than drawn upon.
 
-The multi-passage rule permits one-source-at-a-time extraction: four requests
-each reproducing a single passage never trip a threshold of two. This closes
-that, and it needed a metric the earlier ones could not supply.
-
-**Three candidates were measured and two rejected** (spec v2.1 §3, D2):
-
-| Metric | Legitimate max | Extraction | Usable? |
-| --- | --- | --- | --- |
-| Single-passage *coverage* | 1.00 | 1.00 | **No** — no separation at all |
-| Copied characters | 851 | 608 | **No** — inverted; legitimate is higher |
-| Longest span in words | 71 | 52-106 | **No** — ranges overlap |
-| **Longest span / passage length** | **0.79** | **1.00** | **Yes** |
-
-The normalised version works where the raw versions do not, and the reason is
-mechanical rather than a curve fit. *Coverage* sums every matched fragment
-scattered through a passage, so an answer that quotes several parts and writes
-around them can total 100%. The longest *unbroken* run is a different thing:
-reproducing a passage yields one continuous run covering all of it, whereas
-answering from it yields a quoted portion with original prose either side.
-
-Measured on all 48 preserved legitimate answers from 29 August, the observed
-four-document extraction, and seven synthetic single-document extractions built
-by reproducing a real retrieved passage verbatim.
+Aggregate `passage_coverage`, not a contiguous run. An extractor that quotes a
+passage in fragments and writes between them has still reproduced the passage,
+and measuring the longest unbroken span alone misses that.
 """
 
-SINGLE_PASSAGE_MIN_SPAN_WORDS = 45
-"""Absolute floor, so a short passage quoted in full is not "substantial".
+MIN_REPRODUCED_PASSAGES = 2
+"""How many near-completely reproduced passages constitute depth extraction.
 
-The corpus holds passages from 26 to 183 words. Without this, fully quoting a
-26-word passage would score 1.00 and be flagged, which is a legitimate short
-answer rather than reproduction. The smallest synthetic extraction measured 52
-words, so the floor sits below it with margin.
+**This rule replaced a single-passage rule on 29 August 2026, after that rule
+blocked correct answers in a paid release evaluation.** The retired rule fired
+when the longest *contiguous* span reached 0.90 of one passage and ran to 45
+words. It rejected the critical question "Tell me about Cited." and, in the same
+run, "What is the security posture of the portfolio site?".
 
-Both conditions must hold. Either alone produces false positives.
+The cause is structural rather than a mis-set constant. When a short section
+*is* the answer to a question, the correct answer reproduces essentially all of
+it, and no measurement of that passage in isolation separates "answered from
+this section" from "reproduced this section" - the two are the same text. Two
+repair candidates were measured against the preserved evidence and rejected:
+
+*Require the span to be a large share of the answer.* Rejected: this is the
+same metric spec v2.1 had already measured and discarded. A preserved
+legitimate answer ("What happens to my question after I send it?") scores 1.00
+on it - a 71-word span in a 71-word answer - and it is defeated anyway by
+padding the copied text with prose.
+
+*Raise the absolute word floor.* Rejected: a faithful whole-chunk answer
+produces a span equal to the chunk length, so any floor false-positives on
+every longer chunk. Corpus chunks run 26-183 words and 38 of 64 exceed the
+90-word span of the real violation. No separating value exists.
+
+Counting *how many* passages were reproduced does separate them, because the
+distinguishing behaviour is collecting passages rather than rendering one:
+
+* across 139 preserved legitimate generations from three runs - **zero** trip it;
+* the six identified at-risk answers, each faithfully rendering one whole
+  retrieved passage, are permitted;
+* the real 28 August violation reproduced four passages at coverage 1.00 and is
+  still caught, as are two whole passages from one document, two across
+  documents, and either of those padded with arbitrary surrounding prose.
+
+**The count is not fitted to the failing question.** Sweeping the coverage bar
+from 0.60 to 0.99 gives identical results at every value: zero legitimate false
+positives, zero at-risk false positives, violation caught. A count of three was
+rejected because it misses two whole passages taken from one document. The
+separation is a property of the behaviour, not of the constant, and 0.90 is
+chosen as the value the retired rule already used for "near-complete".
+
+**The narrowing is real and is stated rather than argued away.** One retrieved
+passage may now be reproduced near-completely in a single answer, padded or not.
+That is the cost of allowing a correct answer where one short passage
+substantially is the answer, and the two are textually indistinguishable. What
+still holds: reproduction of two or more passages, including two from the same
+source document; document breadth at `BULK_REPRODUCTION_PASSAGE_THRESHOLD`;
+the stricter passage-count fallback when attribution is unavailable; the
+pre-model question guards; the daily call ceiling and rate limiting; and a
+corpus holding only owner-approved public material, so the exposure is text OJ
+already publishes.
 """
 
 _MIN_RUN_CHARS = 40
@@ -387,52 +411,24 @@ def passage_coverage(answer: str, passages: tuple[str, ...]) -> tuple[float, ...
     return tuple(coverages)
 
 
-def longest_span_fraction(answer: str, passages: tuple[str, ...]) -> tuple[float, int]:
-    """Longest contiguous verbatim run, as `(fraction of its passage, words)`.
+def _is_depth_from_coverage(coverage: tuple[float, ...]) -> bool:
+    """Depth test over already-computed coverage, so the rule has one home."""
+    reproduced = sum(1 for value in coverage if value >= NEAR_COMPLETE_PASSAGE_COVERAGE)
+    return reproduced >= MIN_REPRODUCED_PASSAGES
 
-    Measured against the passage rather than the answer, for the same reason
-    coverage is: the question is how much of a *source* was reproduced, not what
-    the answer was made of.
+
+def is_depth_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
+    """Whether the answer reproduces several retrieved passages near-completely.
+
+    Enforces: *OJ Assistant may quote what a grounded answer needs, but must not
+    reproduce source material as a substitute for answering.*
+
+    Independent of document attribution by design, so it still catches an
+    extractor working inside a single document, which the breadth rule counts as
+    one source. See `MIN_REPRODUCED_PASSAGES` for the measurement, the rejected
+    alternatives, and the one narrowing this accepts.
     """
-    normalised_answer = _normalise(answer)
-    if not normalised_answer:
-        return (0.0, 0)
-
-    best_fraction = 0.0
-    best_words = 0
-    for passage in passages:
-        normalised = _normalise(passage)
-        passage_words = len(normalised.split())
-        if not passage_words:
-            continue
-        matcher = SequenceMatcher(None, normalised, normalised_answer, autojunk=False)
-        for block in matcher.get_matching_blocks():
-            if block.size < _MIN_RUN_CHARS:
-                continue
-            span = normalised[block.a : block.a + block.size]
-            words = len(span.split())
-            fraction = words / passage_words
-            if fraction > best_fraction:
-                best_fraction, best_words = fraction, words
-    return (best_fraction, best_words)
-
-
-def is_single_passage_over_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
-    """Whether one source passage was reproduced rather than answered from.
-
-    Enforces: *OJ Assistant may quote short excerpts necessary to support a
-    grounded answer, but must not reproduce substantial source material as a
-    substitute for answering.*
-
-    Independent of the multi-passage rule and kept alongside it. That rule
-    catches breadth; this one catches depth, and extraction one source at a time
-    is invisible to the first.
-    """
-    fraction, words = longest_span_fraction(answer, passages)
-    return (
-        fraction >= SINGLE_PASSAGE_SPAN_FRACTION
-        and words >= SINGLE_PASSAGE_MIN_SPAN_WORDS
-    )
+    return _is_depth_from_coverage(passage_coverage(answer, passages))
 
 
 def is_bulk_reproduction(
@@ -455,10 +451,14 @@ def is_bulk_reproduction(
     reading and the right default for a caller that cannot say where a passage
     came from. Callers that *can* should, and the shipped path does.
     """
-    if is_single_passage_over_reproduction(answer, passages):
+    coverage = passage_coverage(answer, passages)
+
+    # Depth first: several passages reproduced near-completely is extraction
+    # whatever their attribution, and the breadth count below cannot see it when
+    # they share one source document.
+    if _is_depth_from_coverage(coverage):
         return True
 
-    coverage = passage_coverage(answer, passages)
     substantial = [
         index
         for index, value in enumerate(coverage)

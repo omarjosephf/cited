@@ -21,13 +21,13 @@ from assistant.policy import (
     APPROVED_IDENTITY,
     BULK_EXTRACTION_RESPONSE,
     BULK_REPRODUCTION_MAX_SOURCES,
-    SINGLE_PASSAGE_MIN_SPAN_WORDS,
-    SINGLE_PASSAGE_SPAN_FRACTION,
+    MIN_REPRODUCED_PASSAGES,
+    NEAR_COMPLETE_PASSAGE_COVERAGE,
     UNPUBLISHED_WORK_RESPONSE,
     Policy,
     has_provider_self_identification,
     is_bulk_reproduction,
-    is_single_passage_over_reproduction,
+    is_depth_reproduction,
     passage_coverage,
     screen_answer,
     screen_question,
@@ -256,9 +256,28 @@ class TestBulkReproductionOutputGuard:
         """
         passages = (self.passage("skills"), self.passage("experience"))
         sources = ("project-cited.md", "project-cited.md")
-        answer = " ".join(passages)
+        # The shape the real answer had: one chunk carried the answer and the
+        # second was drawn on partially (measured 0.96 and 0.485). Reproducing
+        # *both* near-completely is depth extraction and is caught below, so
+        # the fixture uses the coverage a real broad answer actually reached.
+        second = " ".join(passages[1].split()[: len(passages[1].split()) // 2])
+        answer = passages[0] + " On the delivery side, " + second
 
         assert is_bulk_reproduction(answer, passages, sources) is False
+
+    def test_reproducing_both_chunks_of_one_document_is_still_caught(self) -> None:
+        """The limit of the breadth narrowing.
+
+        Counting documents allows a broad answer to draw on several chunks of
+        one document. It does not allow reproducing them: two near-completely
+        reproduced passages are depth extraction whatever their attribution.
+        """
+        passages = (self.passage("skills"), self.passage("experience"))
+        sources = ("project-cited.md", "project-cited.md")
+        answer = " ".join(passages)
+
+        assert is_depth_reproduction(answer, passages) is True
+        assert is_bulk_reproduction(answer, passages, sources) is True
 
     def test_the_same_reproduction_across_two_documents_is_bulk(self) -> None:
         """Breadth is what the rule is for, and it still catches it.
@@ -295,13 +314,16 @@ class TestBulkReproductionOutputGuard:
         """
         passages = (self.passage("skills"), self.passage("experience"))
         sources = ("project-cited.md", "project-cited.md")
+        # One passage rendered faithfully - which is the case the 29 August
+        # depth repair exists to permit - plus partial use of the second.
+        second = " ".join(passages[1].split()[: len(passages[1].split()) // 2])
         answer = (
             "Cited is OJ's document assistant, and the short version is that it "
             "answers from documents you give it rather than from general "
             "knowledge. "
             + passages[0]
             + " On the delivery side, "
-            + passages[1]
+            + second
             + " Together those are the parts he considers finished enough to "
             "show publicly."
         )
@@ -309,18 +331,22 @@ class TestBulkReproductionOutputGuard:
         assert is_bulk_reproduction(answer, passages, sources) is False
         assert screen_answer(answer, passages, sources) is None
 
-    def test_single_passage_depth_still_applies_within_one_document(self) -> None:
-        """Narrowing breadth must not disable depth.
+    def test_depth_within_one_document_is_counted_in_passages(self) -> None:
+        """Narrowing breadth must not disable depth - but depth changed too.
 
-        Counting documents is a change to the multi-source rule only. Wholesale
-        reproduction of one passage is still caught, which is what bounds the
-        narrowing.
+        **This assertion was reversed on 29 August 2026.** It previously held
+        that reproducing one whole passage was caught. That rule rejected two
+        correct answers in a paid release evaluation and was replaced: depth is
+        now counted in near-completely reproduced *passages*, so one is
+        permitted and two are not, within a single document as much as across
+        several. See `MIN_REPRODUCED_PASSAGES` for the measurement.
         """
         long_passage = " ".join([self.passage("skills")] * 3)
         passages = (long_passage, self.passage("experience"))
         sources = ("project-cited.md", "project-cited.md")
 
-        assert is_bulk_reproduction(long_passage, passages, sources) is True
+        assert is_bulk_reproduction(long_passage, passages, sources) is False
+        assert is_bulk_reproduction(" ".join(passages), passages, sources) is True
 
     def test_a_short_citation_excerpt_is_allowed(self) -> None:
         passages = tuple(self.passage(m) for m in ("skills", "experience"))
@@ -700,70 +726,219 @@ class TestIdentityVersusArchitectureQuestions:
         assert screen_question("Which Claude model does Cited run on?") is None
 
 
-class TestSinglePassageOverReproduction:
-    """D2's depth rule. The multi-passage rule catches breadth and misses this.
+class TestDepthReproduction:
+    """D2's depth rule: several passages reproduced near-completely.
 
-    Thresholds are measured rather than chosen. Three candidate metrics were
-    rejected on the real data before this one was adopted; the constants carry
-    the numbers.
+    Replaced a single-passage rule that blocked correct answers in a paid
+    release evaluation. The fixtures below are sized like real corpus passages
+    (26-183 words, median 94) and are self-contained, so this runs in CI without
+    the git-ignored evaluation artifacts.
     """
 
-    LONG_PASSAGE = (
-        "OJ is based in Windsor, in Berkshire, in the United Kingdom. Windsor "
-        "is where he lives and where he works from. He works remotely with "
-        "clients and organisations elsewhere in the UK and internationally, so "
-        "his location does not limit where he can take on work, and he has "
-        "worked with international groups throughout his training career."
+    # 52 words, the size at which the retired rule rejected a critical answer.
+    SHORT_PASSAGE = (
+        "Cited is a document assistant that answers questions from a set of "
+        "documents and shows the exact passage each answer came from. When the "
+        "documents do not contain the answer, it says so instead of producing a "
+        "plausible one. It is live and its source is published for inspection "
+        "by anyone who wants to read it."
+    )
+    # 83 words, the second question the retired rule rejected in the same run.
+    MEDIUM_PASSAGE = (
+        "The security posture of OJ's portfolio site is a deliberately minimal "
+        "attack surface with secure defaults. There are no user accounts, no "
+        "database, no admin dashboard, no file uploads, no payments, and no "
+        "user-generated HTML. There is exactly one server-side user-input "
+        "boundary for contact messages, and it validates on the server rather "
+        "than trusting the browser, because client-side validation is a "
+        "convenience for honest users and not a control against dishonest ones."
     )
     OTHER_PASSAGE = (
-        "An unrelated passage about different subject matter entirely, long "
-        "enough to be a plausible alternative retrieval result for some other "
-        "query, and sharing no meaningful phrasing with the passage above it."
+        "Since January 2026 OJ has been E-commerce and Social Media Operations "
+        "Lead at Golden Galore Luxury, working UK-based and remote. In this role "
+        "he handles day-to-day online content and product presentation for a "
+        "luxury goods brand, takes and edits product images, writes item "
+        "descriptions and prepares listing content, and creates captions, sale "
+        "posts and live-selling materials while keeping brand presentation "
+        "consistent using Canva templates across every channel."
+    )
+    PADDING = (
+        "In general terms one might observe that the subject admits several "
+        "framings and deserves careful unhurried consideration from a number of "
+        "different angles before any firm conclusion is reached. " * 4
     )
 
-    def test_reproducing_one_whole_passage_is_caught(self) -> None:
-        """One-source-at-a-time extraction, which the multi-passage rule permits:
-        four requests each returning a single passage never reach a count of two."""
-        passages = (self.LONG_PASSAGE, self.OTHER_PASSAGE)
+    def test_a_faithful_answer_to_a_short_passage_is_allowed(self) -> None:
+        """The active release blocker, as a deterministic fixture.
 
-        assert is_single_passage_over_reproduction(self.LONG_PASSAGE, passages) is True
-        assert is_bulk_reproduction(self.LONG_PASSAGE, passages) is True
-
-    def test_the_multi_passage_rule_alone_would_have_missed_it(self) -> None:
-        """Why a second rule was needed at all."""
-        passages = (self.LONG_PASSAGE, self.OTHER_PASSAGE)
-
-        substantial = sum(
-            1 for c in passage_coverage(self.LONG_PASSAGE, passages) if c >= 0.5
-        )
-
-        assert substantial < 2, "one passage cannot reach the multi-passage count"
-
-    def test_a_short_supporting_quote_is_allowed(self) -> None:
-        """The policy permits excerpts necessary to support a grounded answer."""
+        When a short section *is* the answer, the correct answer reproduces
+        essentially all of it. The retired rule rejected exactly this and cost
+        three frozen release criteria on the critical question "Tell me about
+        Cited.".
+        """
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
         answer = (
-            "OJ is based in Windsor, in Berkshire. He works remotely with clients "
-            "elsewhere, so location is not a constraint on the work he takes on."
+            "Here is the short version. "
+            + self.SHORT_PASSAGE
+            + " You can try it yourself from the link on the projects page."
         )
 
-        assert (
-            is_single_passage_over_reproduction(answer, (self.LONG_PASSAGE,)) is False
+        assert is_depth_reproduction(answer, passages) is False
+        assert is_bulk_reproduction(answer, passages, ("a.md", "b.md")) is False
+        assert screen_answer(answer, passages, ("a.md", "b.md")) is None
+
+    def test_a_faithful_answer_to_a_medium_passage_is_allowed(self) -> None:
+        """The same shape at 83 words, the other question the old rule rejected.
+
+        Length is not what separates answering from reproduction, which is why
+        raising the old word floor was measured and rejected: a faithful answer
+        produces a span equal to the passage, whatever the passage's length.
+        """
+        passages = (self.MEDIUM_PASSAGE, self.OTHER_PASSAGE)
+        answer = (
+            "In short, the site keeps its attack surface small. " + self.MEDIUM_PASSAGE
         )
 
-    def test_a_very_short_passage_quoted_fully_is_not_substantial(self) -> None:
-        """The absolute floor. Reproducing a 12-word passage is 100% of it and
-        still not substantial source material."""
-        passage = (
-            "OJ holds PCEP certification from the Python Institute, awarded July 2025."
+        assert is_depth_reproduction(answer, passages) is False
+        assert screen_answer(answer, passages, ("a.md", "b.md")) is None
+
+    def test_one_near_complete_passage_is_permitted(self) -> None:
+        """The accepted narrowing, asserted rather than left implicit.
+
+        This is a real reduction in protection and is recorded as one: a single
+        retrieved passage may now be reproduced near-completely. It is permitted
+        because it is textually identical to the correct answer above, and the
+        corpus holds only material OJ already publishes.
+        """
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+
+        assert is_depth_reproduction(self.SHORT_PASSAGE, passages) is False
+
+    def test_two_near_complete_passages_from_one_document_are_caught(self) -> None:
+        """Depth's whole purpose: the breadth rule counts this as one source."""
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = self.SHORT_PASSAGE + " " + self.OTHER_PASSAGE
+        sources = ("project-cited.md", "project-cited.md")
+
+        assert is_depth_reproduction(answer, passages) is True
+        assert is_bulk_reproduction(answer, passages, sources) is True
+
+    def test_two_near_complete_passages_across_documents_are_caught(self) -> None:
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = self.SHORT_PASSAGE + " " + self.OTHER_PASSAGE
+
+        assert is_bulk_reproduction(answer, passages, ("a.md", "b.md")) is True
+
+    def test_padding_does_not_hide_two_reproduced_passages(self) -> None:
+        """Coverage is measured against the passage, not the answer, so making
+        the answer longer cannot dilute it. A rule keyed to the answer's
+        composition would be defeated here, which is why one was not used."""
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = self.PADDING + self.SHORT_PASSAGE + self.PADDING + self.OTHER_PASSAGE
+
+        assert is_depth_reproduction(answer, passages) is True
+
+    def test_padding_does_not_change_the_single_passage_result(self) -> None:
+        """The narrowing is the same with or without padding: one passage is one
+        passage. Stated so the boundary is visible rather than discovered."""
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = self.PADDING + self.SHORT_PASSAGE + self.PADDING
+
+        assert is_depth_reproduction(answer, passages) is False
+
+    def test_fragmented_reproduction_is_caught(self) -> None:
+        """Aggregate coverage rather than the longest unbroken run.
+
+        Quoting a passage in pieces with prose between them still reproduces
+        the passage, and coverage sums the pieces where a longest-span measure
+        would score only the largest one.
+
+        **Measured limitation, recorded rather than implied.** Coverage counts
+        only runs of at least `_MIN_RUN_CHARS`. Reproduction broken into
+        fragments shorter than that - by reordering sentences, for instance -
+        scores below the bar and is not caught. That property is inherited from
+        `passage_coverage` and is shared with the breadth rule; the depth repair
+        neither introduced nor fixed it.
+        """
+
+        def fragment(passage: str) -> str:
+            parts = passage.split(". ")
+            return " Worth noting. ".join(
+                part if part.endswith(".") else part + "." for part in parts
+            )
+
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = (
+            fragment(self.SHORT_PASSAGE)
+            + " Moving on to another area. "
+            + fragment(self.OTHER_PASSAGE)
+        )
+        coverage = passage_coverage(answer, passages)
+
+        assert all(c >= NEAR_COMPLETE_PASSAGE_COVERAGE for c in coverage)
+        assert is_depth_reproduction(answer, passages) is True
+
+    def test_the_constants_are_the_approved_ones(self) -> None:
+        """Both halves of the rule, pinned. The count is the part that carries
+        the separation; the coverage bar is insensitive between 0.60 and 0.99."""
+        assert NEAR_COMPLETE_PASSAGE_COVERAGE == 0.90
+        assert MIN_REPRODUCED_PASSAGES == 2
+
+    def test_breadth_is_unchanged_by_the_depth_repair(self) -> None:
+        """Two documents at the 0.50 breadth threshold, well under near-complete,
+        must still be caught by the rule the depth repair did not touch."""
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = (
+            "Some framing first. "
+            + self.partial(self.SHORT_PASSAGE)
+            + " And on another topic entirely. "
+            + self.partial(self.OTHER_PASSAGE)
+        )
+        coverage = passage_coverage(answer, passages)
+
+        assert all(c < NEAR_COMPLETE_PASSAGE_COVERAGE for c in coverage), (
+            "fixture must sit below depth so it tests breadth alone"
+        )
+        assert sum(1 for c in coverage if c >= 0.5) >= 2
+        assert is_bulk_reproduction(answer, passages, ("a.md", "b.md")) is True
+
+    def test_missing_attribution_falls_back_to_the_stricter_count(self) -> None:
+        """Two qualifying passages and no usable sources: count passages, which
+        cannot under-count. Unchanged by this repair, asserted because the depth
+        rule now runs before it."""
+        passages = (self.SHORT_PASSAGE, self.OTHER_PASSAGE)
+        answer = (
+            "Some framing first. "
+            + self.partial(self.SHORT_PASSAGE)
+            + " And on another topic entirely. "
+            + self.partial(self.OTHER_PASSAGE)
         )
 
-        assert is_single_passage_over_reproduction(passage, (passage,)) is False
+        assert is_bulk_reproduction(answer, passages, None) is True
+        assert is_bulk_reproduction(answer, passages, ("only-one.md",)) is True
 
-    def test_both_conditions_are_required(self) -> None:
-        """Either alone produces false positives, which is why the rule is a
-        conjunction rather than whichever fires first."""
-        assert SINGLE_PASSAGE_SPAN_FRACTION == 0.90
-        assert SINGLE_PASSAGE_MIN_SPAN_WORDS == 45
+    def test_the_real_extraction_pattern_remains_blocked(self) -> None:
+        """The 28 August violation's shape, as a deterministic fixture: every
+        retrieved passage reproduced whole, spanning two source documents."""
+        passages = (
+            self.SHORT_PASSAGE,
+            self.MEDIUM_PASSAGE,
+            self.OTHER_PASSAGE,
+        )
+        answer = " ".join(passages)
+        sources = ("project-cited.md", "project-cited.md", "how-oj-works.md")
+
+        replacement = screen_answer(answer, passages, sources)
+
+        assert is_depth_reproduction(answer, passages) is True
+        assert replacement is not None
+        assert replacement.policy == Policy.BULK_REPRODUCTION
+
+    @staticmethod
+    def partial(passage: str) -> str:
+        """Enough of a passage to pass the 0.50 breadth bar, not the 0.90 one."""
+        words = passage.split()
+        return " ".join(words[: int(len(words) * 0.62)])
 
 
 class TestAdversarialExtractionPhrasing:
@@ -819,16 +994,25 @@ class TestAdversarialExtractionPhrasing:
 
     def test_the_output_rule_is_what_holds_for_uncaught_phrasings(self) -> None:
         """The backstop, as a test: however the request was worded, an answer
-        that reproduces a passage wholesale does not reach the visitor."""
-        passage = (
+        that reproduces the retrieved material does not reach the visitor.
+
+        Two passages, because one is no longer enough. Since 29 August 2026 a
+        single near-completely reproduced passage is permitted - see
+        `MIN_REPRODUCED_PASSAGES` - so a one-passage fixture here would assert
+        the retired rule rather than the backstop.
+        """
+        passages = (
             "The security posture of OJ's portfolio site is a deliberately "
             "minimal attack surface with secure defaults. There are no user "
             "accounts, no database, no admin dashboard, no file uploads, no "
             "payments, and no user-generated HTML. There is exactly one "
-            "server-side user-input boundary for contact messages."
+            "server-side user-input boundary for contact messages.",
+            "OJ is completing a BSc Honours in Computing and IT Software at "
+            "The Open University, studied from 2023 and expected to complete "
+            "in 2026, focusing on software, computing, data and AI skills.",
         )
 
-        replacement = screen_answer(passage, (passage,))
+        replacement = screen_answer(" ".join(passages), passages)
 
         assert replacement is not None
         assert replacement.policy == Policy.BULK_REPRODUCTION
@@ -859,17 +1043,26 @@ class TestAdversarialExtractionPhrasing:
             "templates across every channel.",
         )
 
+        # **This assertion was reversed on 29 August 2026 and the reversal is
+        # the point.** Each passage alone is now permitted, because a single
+        # near-completely reproduced passage is textually identical to a correct
+        # answer whose source section is short. What still holds is that the
+        # attacker cannot combine them: any two in one answer is extraction.
         for passage in passages:
-            assert screen_answer(passage, passages) is not None, (
-                "each single-source extraction must be caught individually"
+            assert screen_answer(passage, passages) is None, (
+                "one passage alone is the documented narrowing, not a defect"
             )
 
+        assert screen_answer(" ".join(passages), passages) is not None, (
+            "two passages in one answer must still be caught"
+        )
 
-class TestSinglePassageThresholdAgainstRealData:
+
+class TestDepthRuleAgainstRealData:
     """The measured separation, encoded. Skips when artifacts are absent."""
 
-    def test_no_legitimate_answer_trips_the_single_passage_rule(self) -> None:
-        """All 48 preserved legitimate answers, replayed against the real corpus.
+    def test_no_legitimate_answer_trips_the_depth_rule(self) -> None:
+        """All preserved legitimate answers, replayed against the real corpus.
 
         A false positive here rejects the product answering correctly, which is
         the failure mode that made three earlier candidate metrics unusable.
@@ -900,7 +1093,7 @@ class TestSinglePassageThresholdAgainstRealData:
                 result.chunk.text
                 for result in retriever.search(outcome["question"], top_k=4)
             )
-            if is_single_passage_over_reproduction(outcome["text"], passages):
+            if is_depth_reproduction(outcome["text"], passages):
                 tripped.append(outcome["question"])
 
         assert tripped == [], f"legitimate answers rejected: {tripped}"

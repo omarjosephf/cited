@@ -274,3 +274,157 @@ class TestRuntimeMatchesItsAssumptions:
     def test_the_port_is_not_hardcoded(self, dockerfile: str) -> None:
         """The platform assigns it; a fixed port fails health checks silently."""
         assert "--port ${PORT}" in dockerfile
+
+
+@pytest.fixture(scope="module")
+def oj_fly() -> dict[str, Any]:
+    with (REPO / "fly.oj-assistant.toml").open("rb") as handle:
+        return tomllib.load(handle)
+
+
+class TestSecondDeploymentIsCoherent:
+    """The OJ Assistant app: same image, different corpus.
+
+    A second config sharing a repository with the first has one obvious sharp
+    edge — running the wrong deploy command redeploys the wrong app — and one
+    subtle one, which is that the demo's corpus is still inside the image. If
+    CORPUS_DIR were wrong or absent, this deployment would answer questions about
+    OJ using a prompt-engineering guide, sincerely and with citations.
+    """
+
+    def test_it_is_a_different_app_from_the_demo(
+        self, oj_fly: dict[str, Any], fly: dict[str, Any]
+    ) -> None:
+        """Separate apps mean separate budgets: a burst against one cannot drain
+        the other's allowance."""
+        assert oj_fly["app"] != fly["app"]
+
+    def test_the_port_is_the_same_everywhere(
+        self, oj_fly: dict[str, Any], dockerfile: str
+    ) -> None:
+        declared = int(oj_fly["env"]["PORT"])
+        assert oj_fly["http_service"]["internal_port"] == declared
+        assert f"PORT={declared}" in dockerfile
+
+    def test_https_is_forced(self, oj_fly: dict[str, Any]) -> None:
+        assert oj_fly["http_service"]["force_https"] is True
+
+    def test_it_points_away_from_the_demo_corpus(
+        self, oj_fly: dict[str, Any], dockerfile: str
+    ) -> None:
+        """The failure this prevents is silent and confident: right service,
+        wrong documents, every answer cited and wrong."""
+        corpus = oj_fly["env"]["CORPUS_DIR"]
+
+        assert corpus != "/app/content"
+        assert corpus.startswith("/app/deploy/")
+        assert "COPY --chown=app:app deploy/ ./deploy/" in dockerfile, (
+            "the artifact directory must reach the runtime stage"
+        )
+
+    def test_the_corpus_is_verified_against_a_checksum(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        """A corpus copied from another repository is the one thing here that
+        can go stale without anything failing."""
+        env = oj_fly["env"]
+        assert "CORPUS_CHECKSUM_FILE" in env or "CORPUS_CHECKSUM" in env
+
+    def test_the_checksum_file_lives_inside_the_corpus_artifact(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        artifact_root = oj_fly["env"]["CORPUS_DIR"].rsplit("/", 1)[0]
+
+        assert oj_fly["env"]["CORPUS_CHECKSUM_FILE"].startswith(artifact_root)
+
+    def test_it_uses_its_own_system_prompt(self, oj_fly: dict[str, Any]) -> None:
+        """Otherwise it answers as a generic document assistant — accurate, and
+        not anybody's assistant."""
+        assert oj_fly["env"]["SYSTEM_PROMPT_FILE"].endswith(".md")
+        assert oj_fly["env"]["SYSTEM_PROMPT_FILE"].startswith("/app/deploy/")
+
+    def test_only_an_authorised_caller_may_spend_the_budget(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        """This instance is funded by the owner's own key rather than being a
+        public demo, so the hostname must not be enough to spend it."""
+        assert oj_fly["env"]["REQUIRE_SHARED_SECRET"] == "true"
+
+    def test_no_secret_is_present_in_the_committed_config(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        """Checked by key name and by value, not by substring.
+
+        A substring scan flags `REQUIRE_SHARED_SECRET`, which is a boolean switch
+        and carries nothing. A test that cries wolf on a correct config gets
+        weakened or deleted, so it has to be precise about what it forbids: a
+        *value-bearing* secret variable, and anything shaped like a real key.
+        """
+        env: dict[str, str] = oj_fly["env"]
+
+        forbidden_keys = {"ANTHROPIC_API_KEY", "SHARED_SECRET"}
+        assert not forbidden_keys & set(env), (
+            "this file is committed; secrets belong in `fly secrets set`"
+        )
+
+        for name, value in env.items():
+            assert not str(value).startswith("sk-"), f"{name} looks like a live key"
+
+    def test_the_retrieval_baseline_is_explicit(self, oj_fly: dict[str, Any]) -> None:
+        """Pinned rather than defaulted, so a change to the library default
+        cannot quietly change what was evaluated."""
+        assert oj_fly["env"]["RETRIEVAL_TOP_K"] == "4"
+        assert oj_fly["env"]["ANSWER_MAX_TOKENS"] == "1024"
+
+    def test_scale_to_zero_is_paired_with_its_consequence_in_writing(self) -> None:
+        """The trade is only sound if the reader knows the counter resets.
+
+        A future maintainer reading `min_machines_running = 0` and
+        `DAILY_ANSWER_LIMIT = 40` would reasonably conclude the spend is capped
+        at 40 answers a day. It is not: the machine stops when idle and the
+        counter starts again at zero. The comment is the only thing that carries
+        that, so its absence is a defect.
+        """
+        config = (REPO / "fly.oj-assistant.toml").read_text(encoding="utf-8").lower()
+
+        assert "min_machines_running = 0" in config
+        assert "reset" in config
+        assert "spend cap" in config or "provider cap" in config
+
+    def test_the_deploy_command_names_the_config_and_disables_ha(self) -> None:
+        """Two traps, both of which produce a working deployment of the wrong
+        thing: omitting --config redeploys the demo app, and omitting --ha=false
+        doubles the budget by doubling the process."""
+        config = (REPO / "fly.oj-assistant.toml").read_text(encoding="utf-8")
+
+        assert "--config fly.oj-assistant.toml" in config
+        assert "--ha=false" in config
+
+    def test_the_memory_tier_has_headroom_over_what_was_measured(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        """263 MB measured peak. The failure mode below it is an OOM kill
+        mid-request, which explains itself to nobody."""
+        assert str(oj_fly["vm"][0]["memory"]).lower() == "512mb"
+
+    def test_the_health_check_avoids_the_paid_path(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        checks = oj_fly["http_service"]["checks"]
+        assert all(check["path"] == "/health" for check in checks)
+
+
+class TestDeploymentStagingArea:
+    def test_the_directory_survives_a_clean_checkout(self) -> None:
+        """`COPY deploy/` fails on a missing source, so an empty staging area
+        must still exist. Without the keepfile, cleaning generated artifacts
+        would break every build of the default image."""
+        assert (REPO / "deploy" / ".gitkeep").exists()
+
+    def test_generated_artifacts_are_not_committed(self) -> None:
+        """A corpus committed here would be a second editable copy of public
+        claims — the exact drift the checksum exists to detect."""
+        ignore = (REPO / ".gitignore").read_text(encoding="utf-8")
+
+        assert "deploy/*" in ignore
+        assert "!deploy/.gitkeep" in ignore

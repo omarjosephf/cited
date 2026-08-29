@@ -130,3 +130,159 @@ class TestAsk:
         # An error that only says "no" is worse than one that says what to do.
         assert ".env" in error
         assert "index" in error and "eval" in error
+
+
+class TestEvalIsFreeUnlessPaidIsRequested:
+    """The command-line guarantee: a key alone can never start spending.
+
+    These are the regression tests for a real incident. A command intended as a
+    dry run was executed while `ANTHROPIC_API_KEY` was set in a `.env` file; the
+    old code took "a key is configured" to mean "run the paid half", and made 48
+    billable calls. Nothing here relies on a key being absent, because in the
+    incident it was present.
+    """
+
+    def corpus_and_questions(self, tmp_path: Path) -> tuple[Path, Path]:
+        corpus = tmp_path / "content"
+        corpus.mkdir()
+        (corpus / "doc.md").write_text(
+            "# Doc\n\n## Wanted\n\n" + ("Body text about prompts. " * 30),
+            encoding="utf-8",
+        )
+        questions = tmp_path / "q.toml"
+        questions.write_text(
+            '[[question]]\ntext = "What is this about?"\n'
+            'expects = "Wanted"\nanswerable = true\n',
+            encoding="utf-8",
+        )
+        return corpus, questions
+
+    def test_a_key_alone_does_not_trigger_a_paid_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The incident, as a test."""
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+
+        # Any attempt to construct a provider client fails the test outright,
+        # rather than being detected afterwards by counting calls.
+        def explode(*args: object, **kwargs: object) -> object:
+            raise AssertionError("a provider client was constructed without --paid")
+
+        monkeypatch.setattr("assistant.answering.build_client", explode)
+
+        code = cli.main(
+            ["--corpus", str(corpus), "eval", "--questions", str(questions)]
+        )
+
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "no provider call was made" in out
+
+    def test_paid_without_a_call_ceiling_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spending authority is granted as a number, so the number is required."""
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+        monkeypatch.setattr(
+            "assistant.answering.build_client",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("client built despite a missing ceiling")
+            ),
+        )
+
+        code = cli.main(
+            ["--corpus", str(corpus), "eval", "--questions", str(questions), "--paid"]
+        )
+
+        assert code == 2
+
+    def test_paid_without_a_key_exits_rather_than_pretending_to_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+        code = cli.main(
+            [
+                "--corpus",
+                str(corpus),
+                "eval",
+                "--questions",
+                str(questions),
+                "--paid",
+                "--max-paid-calls",
+                "10",
+            ]
+        )
+
+        assert code == 2
+
+    def test_a_run_needing_more_calls_than_authorised_never_starts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Refused during preflight, before the first call rather than at the
+        ceiling — so an over-large run costs nothing at all."""
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+        monkeypatch.setattr(
+            "assistant.answering.build_client",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("client built despite an insufficient ceiling")
+            ),
+        )
+
+        code = cli.main(
+            [
+                "--corpus",
+                str(corpus),
+                "eval",
+                "--questions",
+                str(questions),
+                "--paid",
+                "--max-paid-calls",
+                "0",
+            ]
+        )
+
+        assert code == 2
+        assert "No calls were made" in capsys.readouterr().err
+
+    def test_the_preflight_never_prints_the_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        secret = "sk-ant-verysecretvalue12345"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+        monkeypatch.setattr(
+            "assistant.answering.build_client",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call expected")),
+        )
+
+        cli.main(
+            [
+                "--corpus",
+                str(corpus),
+                "eval",
+                "--questions",
+                str(questions),
+                "--paid",
+                "--max-paid-calls",
+                "0",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert "configured (value not shown)" in captured.out

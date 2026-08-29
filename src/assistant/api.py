@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,11 +30,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from assistant.answering import Answerer, message_creator
+from assistant.answering import Answerer, load_system_prompt, message_creator
 from assistant.budget import BudgetExhausted, DailyCallBudget
 from assistant.chunking import chunk_passages
+from assistant.corpus_checksum import verify_corpus
 from assistant.documents import read_corpus
 from assistant.embedding import FastEmbedEmbedder
+from assistant.metrics import AssistantMetrics
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
 
@@ -74,10 +77,50 @@ class State:
     settings: Settings
     answerer: Answerer
     budget: DailyCallBudget
+    metrics: AssistantMetrics
     chunk_count: int
+    corpus_checksum: str
 
 
 state = State()
+
+SECRET_HEADER = "X-Assistant-Secret"
+"""Header carrying the shared secret when one is required.
+
+A header rather than a query parameter: query strings are logged by proxies and
+end up in browser history and referrers, which is a poor place for a credential.
+"""
+
+
+def require_caller_secret(request: Request) -> None:
+    """Reject callers that cannot present the shared secret, when one is required.
+
+    The point is narrow and worth stating so it is not oversold: this stops
+    *someone who finds the hostname* from spending the owner's API budget. It is
+    not authentication, there are no identities, and it does nothing whatsoever
+    if the secret leaks.
+
+    Compared with `compare_digest` rather than `==`, so the comparison does not
+    return early on the first differing byte. Timing attacks on a header over a
+    public network are close to impractical, but the constant-time version is one
+    function call and needs no argument about whether the attack is feasible.
+    """
+    settings = state.settings
+    if not settings.require_shared_secret:
+        return
+
+    expected = settings.shared_secret.get_secret_value()
+    if not expected:
+        # Configured to require a secret, with no secret. Failing closed is the
+        # only safe reading: the alternative is serving unauthenticated while
+        # believing otherwise.
+        logger.error("require_shared_secret is set but shared_secret is empty")
+        raise HTTPException(status_code=503, detail="Service is not configured.")
+
+    presented = request.headers.get(SECRET_HEADER, "")
+    if not secrets.compare_digest(presented, expected):
+        # Deliberately says nothing about which part was wrong.
+        raise HTTPException(status_code=401, detail="Not authorised.")
 
 
 @asynccontextmanager
@@ -89,7 +132,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     rather than surface as an error on someone's first question.
     """
     settings = Settings()
-    corpus = Path("content")
+    corpus = settings.corpus_dir
+
+    if settings.require_shared_secret and not settings.shared_secret.get_secret_value():
+        # Checked here as well as per request, so a misconfigured deployment
+        # fails at startup rather than on a visitor's first question.
+        raise RuntimeError(
+            "REQUIRE_SHARED_SECRET is set but SHARED_SECRET is empty. "
+            "Set the secret, or turn the requirement off deliberately."
+        )
+
+    # Before reading anything: is this the corpus that was approved? A stale or
+    # partial copy answers confidently from the wrong content, and refusing to
+    # start is the only response that cannot be mistaken for working.
+    checksum = verify_corpus(corpus, settings.expected_corpus_checksum())
 
     passages = read_corpus(corpus)
     if not passages:
@@ -100,14 +156,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     state.settings = settings
     state.chunk_count = len(chunks)
+    state.corpus_checksum = checksum
     state.budget = DailyCallBudget(limit=settings.daily_answer_limit)
-    state.answerer = Answerer(retriever, message_creator(settings), settings)
+    state.metrics = AssistantMetrics()
+    state.answerer = Answerer(
+        retriever,
+        message_creator(settings),
+        settings,
+        load_system_prompt(settings),
+    )
 
     logger.info(
-        "ready: %d chunks, model %s, daily limit %d",
+        "ready: %d chunks from %s, corpus %s, model %s, daily limit %d, "
+        "shared secret %s",
         len(chunks),
+        corpus,
+        checksum[:12],
         settings.answer_model,
         settings.daily_answer_limit,
+        "required" if settings.require_shared_secret else "not required",
     )
     yield
 
@@ -126,12 +193,33 @@ app.add_exception_handler(RateLimitExceeded, cast(Any, _rate_limit_exceeded_hand
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Liveness plus the two numbers an operator actually needs."""
+    """Liveness plus the numbers an operator actually needs.
+
+    Deliberately unauthenticated and deliberately dull: it carries no visitor
+    content and no aggregate behaviour, only whether the process is up and which
+    corpus it is serving. The checksum prefix is what makes "did the new corpus
+    actually deploy?" answerable without shell access.
+    """
     return {
         "status": "ok",
         "chunks": state.chunk_count,
+        "corpus": state.corpus_checksum[:12],
         "answers_remaining_today": state.budget.remaining,
     }
+
+
+@app.get("/metrics")
+async def metrics(request: Request) -> dict[str, Any]:
+    """Aggregate operator metrics. Never public, never per-question.
+
+    Behind the same secret as `/ask`, because how often an assistant refuses is
+    operational information about someone's business rather than something a
+    passer-by is owed. When no secret is required — the open demo — this endpoint
+    is open too, which is consistent rather than accidental: that deployment has
+    no operator whose numbers need protecting.
+    """
+    require_caller_secret(request)
+    return state.metrics.snapshot(answers_remaining_today=state.budget.remaining)
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -139,10 +227,11 @@ async def health() -> dict[str, Any]:
 async def ask(request: Request, body: AskRequest) -> AskResponse:
     """Answer one question from the corpus.
 
-    `request` is unused here but required: slowapi resolves the client address
-    from it, and omitting it makes the decorator fail at runtime rather than at
-    import.
+    `request` is unused by the body of this function but required: slowapi
+    resolves the client address from it, and the secret check reads its headers.
     """
+    require_caller_secret(request)
+
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="Question cannot be empty.")
@@ -152,24 +241,35 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     try:
         state.budget.spend()
     except BudgetExhausted:
+        state.metrics.record("unavailable", 0.0)
         raise HTTPException(
             status_code=503,
             detail=(
-                "This demo has reached its daily limit of answered questions. "
-                "It resets at midnight UTC."
+                "This service has reached its daily limit of answered "
+                "questions. It resets at midnight UTC."
             ),
         ) from None
 
+    started = time.monotonic()
     try:
         answer = state.answerer.answer(question)
     except Exception:
         state.budget.refund()
+        state.metrics.record("unavailable", (time.monotonic() - started) * 1000)
         # Logged without the question: it is user input, and a log is a place
         # data goes to be retained and read by people it was not sent to.
         logger.exception("answering failed")
         raise HTTPException(
             status_code=502, detail="The answering service is unavailable."
         ) from None
+
+    # Recorded by the outcome a visitor actually saw, so an operator reading
+    # "not_covered" knows what was on screen. Still no question text.
+    state.metrics.record(
+        "answered" if answer.grounded else "not_covered",
+        (time.monotonic() - started) * 1000,
+        answer.rejected_citations,
+    )
 
     if answer.rejected_citations:
         # Should be impossible: the API computes citations from the documents

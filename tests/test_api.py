@@ -23,6 +23,7 @@ from assistant import api
 from assistant.answering import Answer, Citation
 from assistant.budget import DailyCallBudget
 from assistant.chunking import Chunk
+from assistant.metrics import AssistantMetrics
 from assistant.retrieval import SearchResult
 from assistant.settings import Settings
 
@@ -82,7 +83,12 @@ def client() -> Iterator[TestClient]:
     api.state.settings = Settings(anthropic_api_key=SecretStr("test-key"))
     api.state.answerer = StubAnswerer()  # type: ignore[assignment]
     api.state.budget = DailyCallBudget(limit=100)
+    api.state.metrics = AssistantMetrics()
     api.state.chunk_count = 10
+    # A fixed stand-in for the value `verify_corpus` would return. These tests
+    # never read a corpus, so anything real here would be a fiction; what matters
+    # is that the attribute the routes read is present and stable.
+    api.state.corpus_checksum = "0" * 64
     # slowapi keeps counters between tests otherwise, so the first test to run
     # would consume the allowance for the rest.
     api.limiter.reset()
@@ -343,3 +349,167 @@ class TestSecurityHeaders:
     ) -> None:
         """A missed substitution ships the literal marker as the nonce."""
         assert api.NONCE_PLACEHOLDER not in client.get("/").text
+
+
+class TestSharedSecret:
+    """The control that stops a stranger spending the owner's API budget.
+
+    Narrow by design and worth stating so it is not oversold: it is not
+    authentication, there are no identities, and it protects nothing once the
+    secret leaks. What it does is make the hostname insufficient — and for a
+    service whose only cost is paid inference, that is the difference that
+    matters.
+    """
+
+    def secured(self, secret: str = "correct-horse") -> None:
+        api.state.settings = Settings(
+            anthropic_api_key=SecretStr("test-key"),
+            shared_secret=SecretStr(secret),
+            require_shared_secret=True,
+        )
+
+    def test_ask_is_open_when_no_secret_is_required(self, client: TestClient) -> None:
+        """The public demo stays public. The requirement is opt-in, so the
+        default deployment is not silently broken by adding this."""
+        response = client.post("/ask", json={"question": "What are the components?"})
+
+        assert response.status_code == 200
+
+    def test_ask_rejects_a_caller_with_no_secret(self, client: TestClient) -> None:
+        self.secured()
+
+        response = client.post("/ask", json={"question": "What are the components?"})
+
+        assert response.status_code == 401
+
+    def test_ask_rejects_a_caller_with_the_wrong_secret(
+        self, client: TestClient
+    ) -> None:
+        self.secured()
+
+        response = client.post(
+            "/ask",
+            json={"question": "What are the components?"},
+            headers={api.SECRET_HEADER: "wrong"},
+        )
+
+        assert response.status_code == 401
+
+    def test_ask_accepts_the_configured_secret(self, client: TestClient) -> None:
+        self.secured()
+
+        response = client.post(
+            "/ask",
+            json={"question": "What are the components?"},
+            headers={api.SECRET_HEADER: "correct-horse"},
+        )
+
+        assert response.status_code == 200
+
+    def test_a_rejected_caller_does_not_spend_budget(self, client: TestClient) -> None:
+        """The whole point. If the check ran after the reservation, an
+        unauthorised burst would still drain the day's allowance."""
+        self.secured()
+        before = api.state.budget.used
+
+        client.post("/ask", json={"question": "expensive"})
+
+        assert api.state.budget.used == before
+
+    def test_a_rejection_says_nothing_about_which_part_was_wrong(
+        self, client: TestClient
+    ) -> None:
+        self.secured()
+
+        body = client.post("/ask", json={"question": "q"}).json()
+
+        assert "correct-horse" not in str(body)
+        assert body["detail"] == "Not authorised."
+
+    def test_requiring_a_secret_without_setting_one_fails_closed(
+        self, client: TestClient
+    ) -> None:
+        """Misconfiguration must not resolve to 'serve unauthenticated'.
+
+        503 rather than 401: nothing is wrong with the caller, the service is
+        not correctly configured, and saying so is what gets it fixed.
+        """
+        self.secured(secret="")
+
+        response = client.post("/ask", json={"question": "q"})
+
+        assert response.status_code == 503
+
+    def test_health_stays_open(self, client: TestClient) -> None:
+        """A platform health check cannot present a secret. Locking it would
+        make the machine look dead to the thing that restarts it."""
+        self.secured()
+
+        assert client.get("/health").status_code == 200
+
+
+class TestMetrics:
+    def test_metrics_report_outcomes_without_question_text(
+        self, client: TestClient
+    ) -> None:
+        client.post("/ask", json={"question": "What are the components?"})
+
+        body = client.get("/metrics").json()
+
+        assert body["outcomes"]["answered"] == 1
+        assert "What are the components?" not in str(body)
+
+    def test_an_ungrounded_answer_counts_as_not_covered(
+        self, client: TestClient
+    ) -> None:
+        """Metrics use the vocabulary the visitor's screen uses, so a count and
+        a screenshot describe the same thing."""
+        api.state.answerer = StubAnswerer(  # type: ignore[assignment]
+            Answer(
+                text="Not in the documents.", citations=(), grounded=False, results=()
+            )
+        )
+
+        client.post("/ask", json={"question": "Something else entirely"})
+
+        assert client.get("/metrics").json()["outcomes"]["not_covered"] == 1
+
+    def test_an_upstream_failure_counts_as_unavailable(
+        self, client: TestClient
+    ) -> None:
+        api.state.answerer = StubAnswerer(error=RuntimeError("upstream down"))  # type: ignore[assignment]
+
+        client.post("/ask", json={"question": "q"})
+
+        assert client.get("/metrics").json()["outcomes"]["unavailable"] == 1
+
+    def test_budget_exhaustion_counts_as_unavailable(self, client: TestClient) -> None:
+        api.state.budget = DailyCallBudget(limit=0)
+
+        client.post("/ask", json={"question": "q"})
+
+        assert client.get("/metrics").json()["outcomes"]["unavailable"] == 1
+
+    def test_metrics_require_the_secret_when_one_is_required(
+        self, client: TestClient
+    ) -> None:
+        """How often an assistant refuses is operational information about
+        someone's business, not something a passer-by is owed."""
+        api.state.settings = Settings(
+            anthropic_api_key=SecretStr("test-key"),
+            shared_secret=SecretStr("correct-horse"),
+            require_shared_secret=True,
+        )
+
+        assert client.get("/metrics").status_code == 401
+        assert (
+            client.get(
+                "/metrics", headers={api.SECRET_HEADER: "correct-horse"}
+            ).status_code
+            == 200
+        )
+
+    def test_metrics_report_the_remaining_allowance(self, client: TestClient) -> None:
+        body = client.get("/metrics").json()
+
+        assert body["answers_remaining_today"] == api.state.budget.remaining

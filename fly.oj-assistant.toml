@@ -1,0 +1,131 @@
+# Fly.io configuration for the OJ Assistant deployment.
+#
+# A second instance of the same image over a different corpus. Same code, same
+# container, different documents and a different system prompt — which is the
+# claim this project makes about itself, tested by actually doing it rather than
+# by asserting it in a README.
+#
+# DEPLOY WITH:
+#     fly deploy --config fly.oj-assistant.toml --remote-only --ha=false
+#
+# `--ha=false` is not optional, for the same reason it is not optional in
+# fly.toml: a second machine runs a second process with a second in-memory budget
+# counter, so a limit of N answers a day silently permits 2N.
+#
+# `--config` is not optional either. Without it Fly reads fly.toml and redeploys
+# the *demo* app — with this corpus, if it happens to be staged. Two apps sharing
+# a repository is convenient and has exactly this sharp edge.
+#
+# BEFORE THE FIRST DEPLOY, in order:
+#   1. Export the corpus artifact from the portfolio repository
+#      (`npm run assistant:export`). Nothing below works without it.
+#   2. Set the provider spend cap in the Anthropic console. Under scale-to-zero
+#      (see min_machines_running) it is the ONLY hard financial ceiling — the
+#      in-process counter resets on every start. This is an owner action.
+#   3. `fly secrets set ANTHROPIC_API_KEY=... SHARED_SECRET=...`
+#
+# Steps 2 and 3 are owner actions and are deliberately not automated anywhere.
+
+app = "oj-assistant"
+primary_region = "lhr"          # London, matching the demo and the audience
+
+[build]
+
+[env]
+  PORT = "8080"
+
+  # The exported artifact, staged into the image at build time. `content/` is
+  # still in the image and still contains the demo's prompt-engineering corpus;
+  # pointing at it here would serve visitors documents about prompt engineering
+  # in response to questions about OJ, and every answer would be sincerely wrong.
+  CORPUS_DIR = "/app/deploy/oj-assistant/content"
+
+  # Refuse to start unless the corpus hashes to the digest the artifact carries.
+  # The failure this catches is the likely one: a stale or partially copied
+  # corpus, which is otherwise indistinguishable from a correct one until someone
+  # reads an answer carefully.
+  #
+  # What it does not catch, stated so nobody over-trusts it: a wholesale
+  # substitution of corpus AND checksum together, since the digest travels with
+  # the thing it describes. For an independent check, set CORPUS_CHECKSUM to the
+  # value in the release notes — it takes precedence — and compare /health.
+  CORPUS_CHECKSUM_FILE = "/app/deploy/oj-assistant/CHECKSUM"
+
+  # This deployment's own voice and scope. Without it the service answers as a
+  # generic document assistant, which is accurate and completely characterless.
+  SYSTEM_PROMPT_FILE = "/app/deploy/oj-assistant/system-prompt.md"
+
+  # Only the portfolio's server-side route handler may spend this budget. The
+  # secret itself is set with `fly secrets set`, never here: this file is
+  # committed, so anything in it is public.
+  REQUIRE_SHARED_SECRET = "true"
+
+  # An operational allowance, NOT a monetary ceiling — and under
+  # min_machines_running = 0 the distinction is not academic, because the counter
+  # resets on every start and the machine stops whenever it is idle. It bounds a
+  # burst within one process lifetime. The provider cap bounds the bill.
+  DAILY_ANSWER_LIMIT = "40"
+
+  # Baseline values, unchanged from the library defaults and stated explicitly so
+  # a reader does not have to know what the defaults are. Lowering either is a
+  # measured decision against the portfolio evaluation set, not a cost reflex:
+  # top_k 3 must not reduce the retrieval hit rate, and max_tokens 512 must not
+  # truncate a realistic answer or drop a citation.
+  RETRIEVAL_TOP_K = "4"
+  ANSWER_MAX_TOKENS = "1024"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+  # Scale to zero. A deliberate trade, and the trade has two sides.
+  #
+  # Gained: compute cost falls from roughly $3.32/month to near nothing, which is
+  # what makes the whole-project operating target realistic rather than nominal.
+  # Inference is a small fraction of the bill at this traffic; compute was the
+  # larger half.
+  #
+  # Given up: the first request after an idle period waits for a machine to boot
+  # plus 1.8s of measured startup, and the in-memory daily budget starts again at
+  # zero on every one of those starts. The second point is the one that matters —
+  # it is why the provider-side spend cap is load-bearing here rather than merely
+  # advisable, and why DAILY_ANSWER_LIMIT above is described as an allowance.
+  #
+  # Cold-start latency must be measured against the real deployment before public
+  # launch. If it makes the assistant feel broken, this is the setting to revisit
+  # first — the fix is a running machine, and it costs about three dollars.
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    # The bottleneck is the paid API call, not the web layer. Queueing is
+    # preferable to running several expensive calls at once.
+    soft_limit = 20
+    hard_limit = 40
+
+[[http_service.checks]]
+  # /health is unauthenticated by design: a platform health check cannot present
+  # a secret, and locking it would make a healthy machine look dead to the thing
+  # responsible for restarting it. It exposes no visitor content — status, chunk
+  # count, corpus digest prefix, remaining allowance.
+  #
+  # Under scale-to-zero these checks only run while a machine is up, so they do
+  # not keep it awake.
+  path = "/health"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "60s"          # room for the model to load on a cold start
+  method = "GET"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 512 MB, measured rather than guessed: peak resident memory with the model
+  # loaded, the corpus indexed and queries served is 263 MB. Do not reduce it to
+  # save money — the failure mode is the container being killed mid-request,
+  # which surfaces as an unexplained failure rather than as anything that names
+  # its cause. The portfolio corpus is smaller than the demo's, so this has
+  # headroom; re-measure before adding documents in bulk.
+  memory = "512mb"
+  cpus = 1

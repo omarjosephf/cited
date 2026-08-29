@@ -9,6 +9,7 @@ interpret what comes back.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -92,14 +93,16 @@ RESULTS = [result(0, 0.80, "Components"), result(1, 0.70, "Examples")]
 
 
 def answerer(
-    response: FakeResponse, results: list[SearchResult] | None = None
+    response: FakeResponse,
+    results: list[SearchResult] | None = None,
+    settings_override: Settings | None = None,
 ) -> tuple[Answerer, FakeMessages]:
     messages = FakeMessages(response)
     return (
         Answerer(
             StubRetriever(results if results is not None else RESULTS),
             messages,
-            settings(),
+            settings_override or settings(),
         ),
         messages,
     )
@@ -411,3 +414,90 @@ class TestClientConstruction:
         configured = Settings(anthropic_api_key=SecretStr("sk-ant-secret-value"))
         assert "sk-ant-secret-value" not in repr(configured)
         assert "sk-ant-secret-value" not in str(configured.anthropic_api_key)
+
+
+class TestConfigurableSystemPrompt:
+    """The prompt is what makes a generic tool somebody's assistant.
+
+    Week-one behaviour was a single hardcoded string, which is correct for one
+    deployment and wrong for two. These tests cover the seam and, more
+    importantly, the failure modes of the seam: a path that does not exist and a
+    file that is empty both mean "someone configured a prompt and it did not
+    arrive", and answering anyway with the generic default would hide that.
+    """
+
+    def test_the_default_is_used_when_nothing_is_configured(self) -> None:
+        from assistant.answering import SYSTEM_PROMPT, load_system_prompt
+
+        assert load_system_prompt(Settings()) == SYSTEM_PROMPT
+
+    def test_a_configured_file_replaces_the_default(self, tmp_path: Path) -> None:
+        from assistant.answering import load_system_prompt
+
+        prompt = tmp_path / "oj.md"
+        prompt.write_text("You are OJ Assistant.\n", encoding="utf-8")
+
+        loaded = load_system_prompt(Settings(system_prompt_file=prompt))
+
+        assert loaded == "You are OJ Assistant."
+
+    def test_a_missing_file_raises_rather_than_falling_back(
+        self, tmp_path: Path
+    ) -> None:
+        """Falling back would answer in the wrong voice, with the wrong scope,
+        and nothing on screen would say so."""
+        from assistant.answering import load_system_prompt
+
+        with pytest.raises(RuntimeError, match="does not exist"):
+            load_system_prompt(Settings(system_prompt_file=tmp_path / "absent.md"))
+
+    def test_an_empty_file_raises(self, tmp_path: Path) -> None:
+        from assistant.answering import load_system_prompt
+
+        empty = tmp_path / "empty.md"
+        empty.write_text("   \n", encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="empty"):
+            load_system_prompt(Settings(system_prompt_file=empty))
+
+    def test_the_configured_prompt_is_the_one_actually_sent(
+        self, tmp_path: Path
+    ) -> None:
+        """The test that would catch the prompt being loaded and then ignored."""
+        prompt = tmp_path / "oj.md"
+        prompt.write_text("You are OJ Assistant. Cite everything.", encoding="utf-8")
+
+        service, messages = answerer(
+            FakeResponse([FakeBlock("A.", [FakeCitation(0)])]),
+            settings_override=Settings(
+                anthropic_api_key=SecretStr("test-key"), system_prompt_file=prompt
+            ),
+        )
+        service.answer("q")
+
+        assert messages.calls[0]["system"] == "You are OJ Assistant. Cite everything."
+
+    def test_the_prompt_is_read_once_rather_than_per_question(
+        self, tmp_path: Path
+    ) -> None:
+        """Two answers from one instance must have had the same instructions.
+
+        A prompt re-read per request could change between them, which would make
+        the difference between two answers unexplainable — and would put a file
+        read on the paid path for no benefit.
+        """
+        prompt = tmp_path / "oj.md"
+        prompt.write_text("Original instructions.", encoding="utf-8")
+
+        service, messages = answerer(
+            FakeResponse([FakeBlock("A.", [FakeCitation(0)])]),
+            settings_override=Settings(
+                anthropic_api_key=SecretStr("test-key"), system_prompt_file=prompt
+            ),
+        )
+        service.answer("first")
+        prompt.write_text("Swapped underneath us.", encoding="utf-8")
+        service.answer("second")
+
+        assert messages.calls[0]["system"] == messages.calls[1]["system"]
+        assert messages.calls[1]["system"] == "Original instructions."

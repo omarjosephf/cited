@@ -59,6 +59,16 @@ COPY --from=build /install /usr/local
 COPY --from=build --chown=app:app /opt/models /opt/models
 COPY --chown=app:app src/ ./src/
 COPY --chown=app:app content/ ./content/
+# Corpus artifacts staged by another repository, for deployments that serve
+# someone else's documents. Empty for the default image — `deploy/.gitkeep` is
+# tracked precisely so this COPY has a source and the default build does not
+# break when the staging area is cleaned.
+#
+# One image, many corpora: which one is served is decided by CORPUS_DIR at run
+# time, so a corpus change is a redeploy of the same code rather than a fork of
+# it. The service refuses to start if what it finds does not match the checksum
+# the artifact carries.
+COPY --chown=app:app deploy/ ./deploy/
 # LICENSE travels with the image: this is AGPL-3.0, and §13 obliges anyone
 # running it as a network service to offer the source to its users. Shipping the
 # terms alongside the code is the least that requires.

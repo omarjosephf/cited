@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.1
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
         with:
           # Matches `requires-python = ">=3.12"`. Pinned rather than "latest"
           # so a new Python release cannot turn a passing build red overnight
@@ -79,7 +79,7 @@ jobs:
           # point it is still cheap to fix.
           fetch-depth: 1
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
         with:
           python-version: "3.12"
           cache: pip

@@ -12,7 +12,7 @@ paths are the ones least likely to be exercised by hand.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import pytest
@@ -20,7 +20,13 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from assistant import api
-from assistant.answering import Answer, Citation
+from assistant.answering import (
+    MAX_HISTORY_SOURCES,
+    MAX_HISTORY_TURNS,
+    Answer,
+    Citation,
+    Turn,
+)
 from assistant.budget import DailyCallBudget
 from assistant.chunking import Chunk
 from assistant.metrics import AssistantMetrics
@@ -58,9 +64,11 @@ class StubAnswerer:
         self.answer_value = answer or grounded_answer()
         self.error = error
         self.questions: list[str] = []
+        self.histories: list[tuple[Turn, ...]] = []
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
         self.questions.append(question)
+        self.histories.append(tuple(history))
         if self.error:
             raise self.error
         return self.answer_value
@@ -513,3 +521,123 @@ class TestMetrics:
         body = client.get("/metrics").json()
 
         assert body["answers_remaining_today"] == api.state.budget.remaining
+
+
+class TestConversationHistory:
+    """The transport contract for follow-up questions (ADR-0007).
+
+    The browser is not a trust boundary, so every bound the design relies on is
+    asserted here at the edge rather than assumed of the caller.
+    """
+
+    def test_history_reaches_the_answerer(self, client: TestClient) -> None:
+        stub = StubAnswerer()
+        api.state.answerer = stub  # type: ignore[assignment]
+
+        client.post(
+            "/ask",
+            json={
+                "question": "how long did that take?",
+                "history": [
+                    {"question": "what did he build?", "sources": ["Projects"]}
+                ],
+            },
+        )
+
+        assert stub.histories == [(Turn("what did he build?", ("Projects",)),)]
+
+    def test_a_request_without_history_is_answered_as_a_first_turn(
+        self, client: TestClient
+    ) -> None:
+        """The field is optional in both directions: an older client omits it
+        entirely and must still be answered."""
+        stub = StubAnswerer()
+        api.state.answerer = stub  # type: ignore[assignment]
+
+        response = client.post("/ask", json={"question": "what are the components?"})
+
+        assert response.status_code == 200
+        assert stub.histories == [()]
+
+    def test_too_many_turns_are_rejected_without_paying(
+        self, client: TestClient
+    ) -> None:
+        """A hand-written request must not be able to turn a bounded
+        conversation into an unbounded one."""
+        before = api.state.budget.used
+
+        response = client.post(
+            "/ask",
+            json={
+                "question": "and now?",
+                "history": [
+                    {"question": f"question {index}"}
+                    for index in range(MAX_HISTORY_TURNS + 1)
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+        assert api.state.budget.used == before, "an invalid request must cost nothing"
+
+    def test_an_overlong_history_question_is_rejected(self, client: TestClient) -> None:
+        """The ceiling on the current question is worth nothing if an earlier
+        one can be arbitrarily long."""
+        response = client.post(
+            "/ask",
+            json={
+                "question": "and now?",
+                "history": [{"question": "x" * (api.MAX_QUESTION_CHARS + 1)}],
+            },
+        )
+
+        assert response.status_code == 422
+
+    def test_too_many_source_labels_are_rejected(self, client: TestClient) -> None:
+        response = client.post(
+            "/ask",
+            json={
+                "question": "and now?",
+                "history": [
+                    {
+                        "question": "earlier",
+                        "sources": [
+                            f"label {index}" for index in range(MAX_HISTORY_SOURCES + 1)
+                        ],
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+
+    def test_a_prior_answer_supplied_by_the_caller_is_ignored(
+        self, client: TestClient
+    ) -> None:
+        """ADR-0007 E2: the contract has no field for a previous ANSWER.
+
+        A caller that sends one anyway must not have it forwarded. This is the
+        test that keeps generated passage text from being replayed across the
+        trust boundary by a client that decides it knows better.
+        """
+        stub = StubAnswerer()
+        api.state.answerer = stub  # type: ignore[assignment]
+
+        client.post(
+            "/ask",
+            json={
+                "question": "and after that?",
+                "history": [
+                    {
+                        "question": "what did he build?",
+                        "sources": ["Projects"],
+                        "answer": "He built a portfolio platform and cited.",
+                    }
+                ],
+            },
+        )
+
+        forwarded = stub.histories[0][0]
+        assert forwarded.question == "what did he build?"
+        assert not hasattr(forwarded, "answer")
+        assert "portfolio platform" not in repr(forwarded)

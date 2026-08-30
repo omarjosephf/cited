@@ -403,9 +403,29 @@ class TestSecondDeploymentIsCoherent:
     def test_the_memory_tier_has_headroom_over_what_was_measured(
         self, oj_fly: dict[str, Any]
     ) -> None:
-        """263 MB measured peak. The failure mode below it is an OOM kill
-        mid-request, which explains itself to nobody."""
-        assert str(oj_fly["vm"][0]["memory"]).lower() == "512mb"
+        """1.5 GB against a measured 974 MB peak (ADR-0007 E6).
+
+        This asserted 512mb, on a 263 MB figure inherited from the demo corpus —
+        2 markdown files, against this corpus's 10 documents including a PDF.
+        In production it OOM-killed at 512 MB and again at 1 GB, on ten
+        consecutive restarts each, before the server finished starting.
+
+        The number that replaced it is VmHWM of the uvicorn process on a machine
+        that had actually started: 997,320 kB. VmHWM is the high-water mark since
+        process start, so it already includes the startup spike that did the
+        killing. 1 GB is BELOW that peak, which is why the tier below this one is
+        not a saving.
+        """
+        assert str(oj_fly["vm"][0]["memory"]).lower() == "1536mb"
+
+    def test_one_machine_stays_warm(self, oj_fly: dict[str, Any]) -> None:
+        """ADR-0007 E6: scale-to-zero was measured and found broken.
+
+        A stopped machine took 154 seconds to answer /health, against a 20-second
+        timeout in the portfolio's route. The first visitor after idle therefore
+        did not get a slow answer — they got "unavailable".
+        """
+        assert oj_fly["http_service"]["min_machines_running"] == 1
 
     def test_the_health_check_avoids_the_paid_path(
         self, oj_fly: dict[str, Any]

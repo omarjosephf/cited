@@ -16,9 +16,11 @@ import pytest
 from pydantic import SecretStr
 
 from assistant.answering import (
+    MAX_HISTORY_TURNS,
     NOT_IN_CORPUS,
     SYSTEM_PROMPT,
     Answerer,
+    Turn,
     build_client,
 )
 from assistant.chunking import Chunk
@@ -90,6 +92,8 @@ def settings(**overrides: Any) -> Settings:
 
 
 RESULTS = [result(0, 0.80, "Components"), result(1, 0.70, "Examples")]
+
+LINE_BREAK = chr(10)
 
 
 def answerer(
@@ -501,3 +505,161 @@ class TestConfigurableSystemPrompt:
 
         assert messages.calls[0]["system"] == messages.calls[1]["system"]
         assert messages.calls[1]["system"] == "Original instructions."
+
+
+class TestConversationTurns:
+    """Follow-up questions (ADR-0007).
+
+    The property under test throughout is that conversation changes what is
+    RETRIEVED and what context the model sees, and changes nothing about where
+    an answer is allowed to come from.
+    """
+
+    def test_a_follow_up_retrieves_on_the_previous_question_too(self) -> None:
+        """ "How long did that take?" names no subject.
+
+        Retrieved on its own it matches nothing useful, which is the whole
+        reason a conversational assistant needs more than the latest question.
+        """
+        retriever = StubRetriever(RESULTS)
+        service = Answerer(
+            retriever,
+            FakeMessages(FakeResponse([FakeBlock("Two months.")])),
+            settings(),
+        )
+
+        service.answer(
+            "how long did that take?",
+            [Turn("what did OJ build with Python?", ("Projects",))],
+        )
+
+        assert retriever.queries == [
+            "what did OJ build with Python? how long did that take?"
+        ]
+
+    def test_a_first_turn_retrieves_on_the_question_alone(self) -> None:
+        retriever = StubRetriever(RESULTS)
+        service = Answerer(
+            retriever,
+            FakeMessages(FakeResponse([FakeBlock("Four parts.")])),
+            settings(),
+        )
+
+        service.answer("what are the components?")
+
+        assert retriever.queries == ["what are the components?"]
+
+    def test_only_the_immediately_preceding_question_composes_the_query(self) -> None:
+        """Composing the whole conversation drags the query toward whatever was
+        discussed first, which is the opposite of what a follow-up asks for."""
+        retriever = StubRetriever(RESULTS)
+        service = Answerer(
+            retriever, FakeMessages(FakeResponse([FakeBlock("Answer.")])), settings()
+        )
+
+        service.answer(
+            "and after that?",
+            [
+                Turn("tell me about his education"),
+                Turn("what about his certifications?"),
+            ],
+        )
+
+        assert retriever.queries == ["what about his certifications? and after that?"]
+
+    def test_history_beyond_the_cap_keeps_the_most_recent_turns(self) -> None:
+        """Truncating from the front would answer a follow-up using the oldest,
+        least relevant part of the conversation.
+
+        The cap is enforced here as well as at the caller, because the caller is
+        a browser and a hand-written request must not be able to submit forty
+        turns.
+        """
+        messages = FakeMessages(FakeResponse([FakeBlock("Answer.")]))
+        service = Answerer(StubRetriever(RESULTS), messages, settings())
+        history = [Turn(f"question {index}") for index in range(10)]
+
+        service.answer("and now?", history)
+
+        blocks = messages.calls[0]["messages"][0]["content"]
+        text = "\n".join(block["text"] for block in blocks if block["type"] == "text")
+        assert "question 9" in text
+        assert "question 6" in text
+        assert "question 5" not in text, f"more than {MAX_HISTORY_TURNS} turns survived"
+
+    def test_the_history_block_carries_questions_and_labels_only(self) -> None:
+        """ADR-0007 E2: no prior ANSWER text crosses the boundary.
+
+        Replaying generated prose would push corpus passages back over the
+        trust boundary on every turn — the extraction surface the cap exists to
+        bound.
+        """
+        messages = FakeMessages(FakeResponse([FakeBlock("Answer.")]))
+        service = Answerer(StubRetriever(RESULTS), messages, settings())
+
+        service.answer(
+            "and after that?",
+            [Turn("what did he build?", ("Projects", "Skills"))],
+        )
+
+        blocks = messages.calls[0]["messages"][0]["content"]
+        history_text = LINE_BREAK.join(
+            block["text"] for block in blocks if block["type"] == "text"
+        )
+        assert "what did he build?" in history_text
+        assert "Projects" in history_text
+        assert "Skills" in history_text
+
+    def test_the_history_block_is_not_citable(self) -> None:
+        """Only documents carry `citations`. A citation can therefore never
+        resolve to something the caller supplied rather than the corpus."""
+        messages = FakeMessages(FakeResponse([FakeBlock("Answer.")]))
+        service = Answerer(StubRetriever(RESULTS), messages, settings())
+
+        service.answer("and after that?", [Turn("what did he build?")])
+
+        blocks = messages.calls[0]["messages"][0]["content"]
+        for block in blocks:
+            if block["type"] != "document":
+                assert "citations" not in block
+
+    def test_documents_keep_their_indices_when_history_is_present(self) -> None:
+        """`document_index` is how a citation maps back to its chunk. A block
+        inserted before the documents would silently remap every citation."""
+        messages = FakeMessages(FakeResponse([FakeBlock("Answer.")]))
+        service = Answerer(StubRetriever(RESULTS), messages, settings())
+
+        service.answer("and after that?", [Turn("what did he build?")])
+
+        blocks = messages.calls[0]["messages"][0]["content"]
+        documents = [
+            index for index, block in enumerate(blocks) if block["type"] == "document"
+        ]
+        assert documents == list(range(len(RESULTS)))
+
+    def test_blank_history_questions_are_dropped(self) -> None:
+        retriever = StubRetriever(RESULTS)
+        service = Answerer(
+            retriever, FakeMessages(FakeResponse([FakeBlock("Answer.")])), settings()
+        )
+
+        service.answer("and after that?", [Turn("   ")])
+
+        assert retriever.queries == ["and after that?"]
+
+    def test_an_earlier_question_does_not_refuse_the_current_one(self) -> None:
+        """Earlier turns were screened when they were asked.
+
+        Re-screening them would let one refused question poison the rest of the
+        conversation, refusing legitimate questions that follow it.
+        """
+        messages = FakeMessages(FakeResponse([FakeBlock("Four parts.")]))
+        service = Answerer(StubRetriever(RESULTS), messages, settings())
+
+        answer = service.answer(
+            "what are the components?",
+            [Turn("what AI model are you?")],
+        )
+
+        assert messages.calls, "the current question should still have been answered"
+        assert answer.text == "Four parts."

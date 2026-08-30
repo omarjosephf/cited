@@ -7,12 +7,13 @@ score while measuring the wrong thing.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
-from assistant.answering import Answer, Citation
+from assistant.answering import Answer, Citation, Turn
 from assistant.chunking import Chunk
 from assistant.evaluation import (
     AnswerOutcome,
@@ -216,7 +217,7 @@ class StubAnswerer:
     def __init__(self, answers: dict[str, Answer]) -> None:
         self.answers = answers
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
         return self.answers[question]
 
 
@@ -644,7 +645,7 @@ class _CountingAnswerer:
         self._grounded = grounded
         self._refused = refused
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
         self.calls += 1
         return Answer(
             text="An answer.",
@@ -983,7 +984,7 @@ class TestPaidCallReporting:
             self._outer = outer
             self._pattern = list(pattern)
 
-        def answer(self, question: str) -> Answer:
+        def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
             return self._outer.answer(called=self._pattern.pop(0))
 
     def test_policy_and_prefilter_answers_report_zero_calls(self) -> None:

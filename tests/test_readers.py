@@ -269,3 +269,27 @@ def test_every_advertised_suffix_has_a_working_reader(
         path.write_text("# H\n\nContent.\n", encoding="utf-8")
 
     assert read_document(path), f"no passages extracted from {suffix}"
+
+
+def test_documents_are_ordered_the_same_way_on_every_platform(tmp_path: Path) -> None:
+    """Order is by the corpus-relative POSIX path, not by the platform's own.
+
+    `sorted()` over `Path` objects is case-insensitive on Windows and
+    case-sensitive on Linux, so a corpus containing one capitalised filename —
+    this one contains `OJ_Florendo_Rayatchi_Public_CV.pdf` — is read in two
+    different orders from identical bytes.
+
+    The consequence is not cosmetic. `vectors.py` binds a stored matrix to the
+    order of the chunks it embedded, so a matrix built on one platform and
+    loaded on another describes different rows: every citation would point at
+    the wrong passage, while every answer still looked normal.
+
+    Asserted with capitals first, which is ASCII order and therefore the Linux
+    order — the one the container uses.
+    """
+    (tmp_path / "apple.md").write_text("# Apple\n\nRed.\n", encoding="utf-8")
+    (tmp_path / "Zebra.md").write_text("# Zebra\n\nStriped.\n", encoding="utf-8")
+
+    sources = [passage.source for passage in read_corpus(tmp_path)]
+
+    assert sources == ["Zebra.md", "apple.md"]

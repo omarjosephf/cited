@@ -46,6 +46,36 @@ RUN pip install --prefix=/install ".[api]"
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
     python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/opt/models')"
 
+# Embed every corpus in the image, here, on a build machine that is not
+# throttled. Measured on the portfolio corpus: 7.4s of an 8.4s cold start goes
+# into this, and three to four minutes of it on the deployment's shared CPU
+# slice, where the calling route gives up after twenty.
+#
+# Built here rather than committed beside each corpus, because a derived file
+# checked in next to its source is a file that can be forgotten. Building it
+# from the corpus that is in this image means the two cannot disagree by
+# omission. They can still disagree if the chunker or `Chunk.indexed_text`
+# changes without a rebuild, which is why `vectors.py` binds each matrix to a
+# digest of the strings it embedded, and the service refuses to start on a
+# mismatch rather than quietly re-embedding.
+#
+# One file per corpus, named for its deployment. Which one is read is decided by
+# CORPUS_VECTORS_FILE at run time, next to the CORPUS_DIR it has to match. It is
+# deliberately NOT defaulted below: an image pointed at somebody else's
+# documents should embed them at startup, not fail a digest check for vectors it
+# was never told about.
+COPY content/ ./content/
+COPY deploy/ ./deploy/
+RUN PYTHONPATH=/install/lib/python3.12/site-packages \
+    EMBEDDING_CACHE_DIR=/opt/models \
+    sh -eux -c 'mkdir -p /opt/vectors; \
+      python -m assistant.cli --corpus content embed --out /opt/vectors/content.npz; \
+      for corpus in deploy/*/content; do \
+        [ -d "$corpus" ] || continue; \
+        app=$(basename "$(dirname "$corpus")"); \
+        python -m assistant.cli --corpus "$corpus" embed --out "/opt/vectors/$app.npz"; \
+      done'
+
 
 FROM python:3.12-slim AS runtime
 
@@ -57,6 +87,8 @@ RUN useradd --create-home --uid 1000 app
 WORKDIR /app
 COPY --from=build /install /usr/local
 COPY --from=build --chown=app:app /opt/models /opt/models
+# Roughly 100 KB per corpus, read once at startup instead of being recomputed.
+COPY --from=build --chown=app:app /opt/vectors /opt/vectors
 COPY --chown=app:app src/ ./src/
 COPY --chown=app:app content/ ./content/
 # Corpus artifacts staged by another repository, for deployments that serve

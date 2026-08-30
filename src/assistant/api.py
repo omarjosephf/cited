@@ -15,6 +15,7 @@ three and none of them substitutes for another:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import time
@@ -42,10 +43,11 @@ from assistant.budget import BudgetExhausted, DailyCallBudget
 from assistant.chunking import chunk_passages
 from assistant.corpus_checksum import verify_corpus
 from assistant.documents import read_corpus
-from assistant.embedding import FastEmbedEmbedder
+from assistant.embedding import MODEL_NAME, Embedder, FastEmbedEmbedder
 from assistant.metrics import AssistantMetrics
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
+from assistant.vectors import load as load_vectors
 
 logger = logging.getLogger(__name__)
 
@@ -149,13 +151,37 @@ def require_caller_secret(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Not authorised.")
 
 
+async def warm_embedder(embedder: Embedder) -> None:
+    """Load the model off the startup path, once the service is already serving.
+
+    With precomputed vectors nothing loads the model until a question arrives,
+    which would move a cold start onto a visitor rather than removing it. This
+    pays that cost in the background: the platform sees a healthy machine within
+    seconds, and the model is ready well before anyone has finished typing.
+
+    `to_thread` because the load is blocking CPU work and this runs on the event
+    loop; without it a "background" warm-up would block every request it was
+    supposed to protect.
+
+    Failure is logged and swallowed on purpose. A warm-up is an optimisation —
+    the first question loads the model itself if this did not — and taking the
+    process down over a slow optimisation would trade a slow answer for none.
+    """
+    try:
+        await asyncio.to_thread(embedder.embed_query, "warm-up")
+    except Exception:
+        logger.exception("embedder warm-up failed; the first question will load it")
+    else:
+        logger.info("embedder warm")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Index the corpus before serving.
 
-    Done at startup rather than per request because embedding the corpus takes
-    seconds, and because a corpus that fails to load should stop the process
-    rather than surface as an error on someone's first question.
+    Done at startup rather than per request because a corpus that fails to load
+    should stop the process rather than surface as an error on someone's first
+    question.
     """
     settings = Settings()
     corpus = settings.corpus_dir
@@ -178,7 +204,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(f"No documents found in {corpus}/. Nothing to serve.")
 
     chunks = chunk_passages(passages)
-    retriever = InMemoryRetriever(chunks, FastEmbedEmbedder())
+    embedder = FastEmbedEmbedder()
+
+    # Precomputed or computed here, never "precomputed if it works": a
+    # configured vectors file that does not describe this corpus raises out of
+    # `load_vectors` and stops the process. See `vectors.py` for why silence is
+    # the wrong response to that.
+    matrix = None
+    if settings.corpus_vectors_file is not None:
+        matrix = load_vectors(
+            settings.corpus_vectors_file,
+            chunks,
+            model=MODEL_NAME,
+            dimensions=embedder.dimensions,
+        )
+
+    retriever = InMemoryRetriever(chunks, embedder, matrix)
 
     state.settings = settings
     state.chunk_count = len(chunks)
@@ -202,7 +243,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.daily_answer_limit,
         "required" if settings.require_shared_secret else "not required",
     )
-    yield
+
+    # Started only when the corpus was not embedded here. Embedding it already
+    # loaded the model, so a warm-up would be a second call that proves nothing.
+    warmup = (
+        asyncio.create_task(warm_embedder(embedder)) if matrix is not None else None
+    )
+    try:
+        yield
+    finally:
+        if warmup is not None:
+            warmup.cancel()
 
 
 app = FastAPI(

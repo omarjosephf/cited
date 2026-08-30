@@ -13,6 +13,7 @@ system is answer generation.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Protocol, cast
 
 import numpy as np
@@ -81,14 +82,23 @@ class FastEmbedEmbedder:
         # visitor as the demo being broken rather than loading.
         self._cache_dir = cache_dir or os.environ.get("EMBEDDING_CACHE_DIR") or None
         self._model: object | None = None
+        self._lock = threading.Lock()
 
     def _loaded(self) -> object:
+        # Double-checked under a lock, because with precomputed vectors the
+        # first load is genuinely concurrent: the API warms the model on a
+        # background thread while a visitor's first question may arrive on
+        # another. Unguarded, both threads see `None` and build a model, and the
+        # loser's copy is discarded after the memory has already been taken —
+        # a transient doubling on the one machine sized against a measured peak.
         if self._model is None:
-            from fastembed import TextEmbedding
+            with self._lock:
+                if self._model is None:
+                    from fastembed import TextEmbedding
 
-            self._model = TextEmbedding(
-                model_name=self._model_name, cache_dir=self._cache_dir
-            )
+                    self._model = TextEmbedding(
+                        model_name=self._model_name, cache_dir=self._cache_dir
+                    )
         return self._model
 
     @property

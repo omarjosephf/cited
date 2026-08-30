@@ -303,7 +303,13 @@ class Answerer:
         # so that a broad question about one project cannot be mistaken for an
         # attempt to empty the corpus. See BULK_REPRODUCTION_MAX_SOURCES.
         sources = tuple(result.chunk.source for result in results)
-        replacement = screen_answer(answer.text, passages, sources)
+        # Documents earlier turns drew on, so the conversation-level bound can
+        # be applied without the service remembering anything between requests
+        # (ADR-0007 E1 stays intact: this comes from the request, not a session).
+        prior_sources = tuple(
+            source for turn in turns for source in turn.sources if source
+        )
+        replacement = screen_answer(answer.text, passages, sources, prior_sources)
         if replacement is not None:
             return self._policy_answer(
                 replacement,

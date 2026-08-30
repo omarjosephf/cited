@@ -224,9 +224,26 @@ def read_corpus(directory: Path) -> list[Passage]:
     Non-content files are skipped rather than fatal: a corpus folder accumulates
     a README, a stray image, an editor backup. A *supported* content file that
     fails to parse is a real problem and is allowed to raise.
+
+    **Sorted by the corpus-relative POSIX path, not by `Path`.** `sorted()` on
+    `Path` objects orders them the way the local platform does, and Windows
+    compares paths case-insensitively while Linux does not. This corpus contains
+    `OJ_Florendo_Rayatchi_Public_CV.pdf`: it sorts sixth on the development
+    machine and *first* in the Linux container, so the two produce different
+    document orders from identical bytes.
+
+    That was invisible while the corpus was only ever read and used inside one
+    process — order set `Chunk.index` and nothing else. It stopped being
+    invisible when `vectors.py` began binding a matrix to the order of the
+    chunks it embedded: a matrix built on one platform then looked up on another
+    describes different rows. Sorting on the relative POSIX path is also the key
+    `corpus_checksum.file_digests` already uses, so the two modules now agree
+    about what "in order" means.
     """
     passages: list[Passage] = []
-    for path in sorted(directory.rglob("*")):
+    for path in sorted(
+        directory.rglob("*"), key=lambda p: p.relative_to(directory).as_posix()
+    ):
         if not is_corpus_document(path):
             continue
         # POSIX separators so a citation reads the same on every platform;

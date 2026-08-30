@@ -17,6 +17,7 @@ ADR-0002 records the measurement that ruled the threshold approach out.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -26,6 +27,35 @@ from assistant.settings import Settings
 
 if TYPE_CHECKING:
     from anthropic import Anthropic
+
+MAX_HISTORY_TURNS = 4
+"""How many earlier turns may influence an answer (ADR-0007 E4).
+
+Enforced here as well as at the caller. The caller is a browser, which is not a
+trust boundary: a hand-written request must not be able to submit forty turns
+and turn a bounded conversation into an unbounded one.
+"""
+
+MAX_HISTORY_SOURCES = 8
+"""Source labels carried per earlier turn. Bounded for the same reason."""
+
+
+@dataclass(frozen=True)
+class Turn:
+    """One earlier exchange, as the browser reports it.
+
+    Carries the visitor's earlier question and the labels of the documents that
+    answered it — deliberately NOT the answer text (ADR-0007 E2). Replaying
+    generated prose would push passage text back across the trust boundary on
+    every turn, widening the extraction surface for no retrieval benefit that
+    the question and its sources do not already provide.
+
+    Untrusted input: everything here came from a request body.
+    """
+
+    question: str
+    sources: tuple[str, ...] = ()
+
 
 SYSTEM_PROMPT = """\
 You answer questions using only the documents provided in the user turn.
@@ -80,6 +110,27 @@ def load_system_prompt(settings: Settings) -> str:
     if not prompt:
         raise RuntimeError(f"system prompt file {path} is empty.")
     return prompt
+
+
+def retrieval_query(question: str, history: Sequence[Turn] = ()) -> str:
+    """The text actually embedded for retrieval (ADR-0007 E3).
+
+    A follow-up like "how long did that take?" retrieves nothing useful on its
+    own — it names no subject. Composing it with the previous question restores
+    the subject without a second model call to rewrite it.
+
+    Only the immediately preceding question is used. Composing the whole
+    conversation drags the query toward whatever was discussed first, which is
+    the opposite of what a follow-up asks for.
+
+    Module-level rather than a method because the evaluation harness scores
+    retrieval WITHOUT going through `Answerer`. When this rule lived on the
+    class, the harness measured follow-ups as though they had no context and
+    reported misses the product does not have.
+    """
+    if not history:
+        return question
+    return f"{history[-1].question} {question}"
 
 
 @dataclass(frozen=True)
@@ -195,7 +246,7 @@ class Answerer:
         # the same instructions.
         self._system_prompt = system_prompt or load_system_prompt(self._settings)
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
         settings = self._settings
 
         # Application policy first, before retrieval and before any paid call.
@@ -203,11 +254,18 @@ class Answerer:
         # properties this product has regardless of what a model would say, so
         # they are decided here rather than requested in a prompt. Two paid
         # evaluations showed prompt instructions failing to hold them.
+        #
+        # Screened on the CURRENT question only. Earlier turns were screened when
+        # they were asked, and re-screening them would let an old, already
+        # answered question refuse a new and legitimate one.
         decided = screen_question(question)
         if decided is not None:
             return self._policy_answer(decided, ())
 
-        results = self._retriever.search(question, top_k=settings.retrieval_top_k)
+        turns = self._bounded_history(history)
+        results = self._retriever.search(
+            retrieval_query(question, turns), top_k=settings.retrieval_top_k
+        )
 
         if not results:
             return Answer(NOT_IN_CORPUS, (), grounded=False, results=())
@@ -223,7 +281,10 @@ class Answerer:
             "max_tokens": settings.answer_max_tokens,
             "system": self._system_prompt,
             "messages": [
-                {"role": "user", "content": self._build_content(question, results)}
+                {
+                    "role": "user",
+                    "content": self._build_content(question, results, turns),
+                }
             ],
         }
         # Only sent when configured. `effort` is rejected by the Haiku tier, so
@@ -242,7 +303,13 @@ class Answerer:
         # so that a broad question about one project cannot be mistaken for an
         # attempt to empty the corpus. See BULK_REPRODUCTION_MAX_SOURCES.
         sources = tuple(result.chunk.source for result in results)
-        replacement = screen_answer(answer.text, passages, sources)
+        # Documents earlier turns drew on, so the conversation-level bound can
+        # be applied without the service remembering anything between requests
+        # (ADR-0007 E1 stays intact: this comes from the request, not a session).
+        prior_sources = tuple(
+            source for turn in turns for source in turn.sources if source
+        )
+        replacement = screen_answer(answer.text, passages, sources, prior_sources)
         if replacement is not None:
             return self._policy_answer(
                 replacement,
@@ -285,12 +352,17 @@ class Answerer:
 
     @staticmethod
     def _build_content(
-        question: str, results: list[SearchResult]
+        question: str,
+        results: list[SearchResult],
+        history: Sequence[Turn] = (),
     ) -> list[dict[str, Any]]:
-        """One document per chunk, then the question.
+        """One document per chunk, then any conversation context, then the question.
 
         Document order is load-bearing: the API reports `document_index`, and
         that index is how a citation is mapped back to the chunk it came from.
+        The conversation block is therefore appended AFTER every document, so
+        the documents keep indices 0..n-1 and no citation is remapped by the
+        presence of earlier turns.
         """
         blocks: list[dict[str, Any]] = [
             {
@@ -305,8 +377,47 @@ class Answerer:
             }
             for result in results
         ]
+        context = Answerer._history_block(history)
+        if context is not None:
+            blocks.append(context)
         blocks.append({"type": "text", "text": question})
         return blocks
+
+    @staticmethod
+    def _bounded_history(history: Sequence[Turn]) -> tuple[Turn, ...]:
+        """The most recent turns, within the caps, with empties dropped.
+
+        Takes the LAST `MAX_HISTORY_TURNS`, not the first: an over-long history
+        means the oldest context is the least relevant, and truncating from the
+        front would answer a follow-up using the wrong part of the conversation.
+        """
+        usable = [turn for turn in history if turn.question.strip()]
+        return tuple(
+            Turn(turn.question.strip(), tuple(turn.sources[:MAX_HISTORY_SOURCES]))
+            for turn in usable[-MAX_HISTORY_TURNS:]
+        )
+
+    @staticmethod
+    def _history_block(history: Sequence[Turn]) -> dict[str, Any] | None:
+        """Earlier turns, as plain context the model may use to resolve a reference.
+
+        Questions and source labels only. This block carries no document text and
+        has `citations` disabled by omission — nothing here is quotable, so
+        nothing here can become a citation. Anything the answer asserts must
+        still come from the documents above it.
+        """
+        if not history:
+            return None
+        lines = ["Earlier in this conversation the visitor asked:"]
+        for turn in history:
+            sources = ", ".join(turn.sources)
+            suffix = f" (answered from: {sources})" if sources else ""
+            lines.append(f'- "{turn.question}"{suffix}')
+        lines.append(
+            "Use this only to understand what the new question refers to. "
+            "Answer the new question from the documents above."
+        )
+        return {"type": "text", "text": "\n".join(lines)}
 
     @staticmethod
     def _quote_is_present(quote: str, passage: str) -> bool:

@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from assistant.answering import Answer, MessageCreator
+from assistant.answering import Answer, MessageCreator, Turn, retrieval_query
 from assistant.retrieval import Retriever
 
 DEFAULT_QUESTIONS = Path(__file__).resolve().parents[2] / "eval" / "questions.toml"
@@ -76,6 +77,15 @@ class Question:
     Naming the specific policy rather than accepting any of them is deliberate.
     "Some deterministic control fired" is a much weaker claim than "the privacy
     boundary fired", and only the second is worth testing."""
+    history: tuple[Turn, ...] = ()
+    """Earlier turns to ask this question in the context of (ADR-0007).
+
+    A follow-up like "how long did that take?" cannot be evaluated as a
+    standalone question — it names no subject, and scoring it alone measures
+    something the product never does. Expressed here so the harness exercises
+    the same path a visitor does, rather than a simplified one that always
+    passes.
+    """
     critical: bool = False
     """Whether this question belongs to the critical core subset.
 
@@ -162,6 +172,24 @@ def load_questions(path: Path | None = None) -> list[Question]:
                 "critical marks a required retrieval hit, not a required refusal"
             )
 
+        # Optional. A malformed turn is an error rather than something to skip:
+        # an evaluation that silently drops the context it was meant to supply
+        # measures the wrong thing and reports a number anyway.
+        history: list[Turn] = []
+        for turn in entry.get("history", []):
+            if not isinstance(turn, dict) or not str(turn.get("question", "")).strip():
+                raise InvalidQuestionSet(
+                    f"{text!r} has a history entry with no question text"
+                )
+            sources = turn.get("sources", [])
+            if not isinstance(sources, list):
+                raise InvalidQuestionSet(
+                    f"{text!r} has a history entry whose sources are not a list"
+                )
+            history.append(
+                Turn(str(turn["question"]).strip(), tuple(str(s) for s in sources))
+            )
+
         questions.append(
             Question(
                 text=text,
@@ -170,6 +198,7 @@ def load_questions(path: Path | None = None) -> list[Question]:
                 note=entry.get("note"),
                 outcome_class=outcome_class,
                 expects_policy=entry.get("expects_policy"),
+                history=tuple(history),
                 critical=critical,
             )
         )
@@ -270,7 +299,10 @@ def evaluate_retrieval(
     outcomes: list[RetrievalOutcome] = []
 
     for question in questions:
-        results = retriever.search(question.text, top_k=top_k)
+        # Scored on the same text the product would embed, history included.
+        results = retriever.search(
+            retrieval_query(question.text, question.history), top_k=top_k
+        )
         sections = tuple(r.chunk.section or r.chunk.source for r in results)
 
         rank: int | None = None
@@ -595,7 +627,7 @@ class AnswerProvider(Protocol):
     key — which in practice means the tests do not get written at all.
     """
 
-    def answer(self, question: str) -> Answer: ...
+    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer: ...
 
 
 class EvaluationBudgetExceeded(RuntimeError):
@@ -721,7 +753,7 @@ def evaluate_answering(
         # The ceiling is now enforced by BudgetedMessageCreator, which sits at
         # the point where money actually moves. A counter anywhere else is
         # counting a proxy.
-        answer = answerer.answer(question.text)
+        answer = answerer.answer(question.text, question.history)
         cited_expected = question.expects is not None and any(
             question.expects in citation.source for citation in answer.citations
         )

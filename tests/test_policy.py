@@ -21,12 +21,15 @@ from assistant.policy import (
     APPROVED_IDENTITY,
     BULK_EXTRACTION_RESPONSE,
     BULK_REPRODUCTION_MAX_SOURCES,
+    CONVERSATION_SOURCE_BREADTH_MAX,
     MIN_REPRODUCED_PASSAGES,
     NEAR_COMPLETE_PASSAGE_COVERAGE,
+    SUBSTANTIAL_PASSAGE_WORDS,
     UNPUBLISHED_WORK_RESPONSE,
     Policy,
     has_provider_self_identification,
     is_bulk_reproduction,
+    is_conversation_extraction,
     is_depth_reproduction,
     passage_coverage,
     screen_answer,
@@ -1097,3 +1100,108 @@ class TestDepthRuleAgainstRealData:
                 tripped.append(outcome["question"])
 
         assert tripped == [], f"legitimate answers rejected: {tripped}"
+
+
+def _passage(words: int, seed: str = "detail") -> str:
+    """A passage of a given length, distinct enough not to match another."""
+    return " ".join(f"{seed}{index}" for index in range(words))
+
+
+class TestSubstantialSinglePassage:
+    """One whole passage: free when short, extraction when long.
+
+    The owner-approved narrowing of 30 August 2026. The rule this restores was
+    retired for rejecting correct answers, and the reason was length rather than
+    principle — a short section largely IS the answer to a question about it.
+    """
+
+    def test_one_short_passage_reproduced_whole_is_not_extraction(self) -> None:
+        """The regression that retired the old rule.
+
+        "Tell me about Cited." is answered from a 52-word section. Reproducing
+        it is what a correct answer looks like, and a rule that blocks it blocks
+        the product's most important question.
+        """
+        passage = _passage(50)
+        assert is_depth_reproduction(passage, (passage,)) is False
+
+    def test_one_substantial_passage_reproduced_whole_is_extraction(self) -> None:
+        """Above the threshold, one whole passage is a document handover.
+
+        This is the case the count-only rule allowed: the longest passages in
+        the corpus (158-183 words) could be reproduced in full, one per request,
+        indefinitely.
+        """
+        passage = _passage(SUBSTANTIAL_PASSAGE_WORDS + 10)
+        assert is_depth_reproduction(passage, (passage,)) is True
+
+    def test_two_short_passages_are_still_extraction(self) -> None:
+        """The count rule is unchanged; the length rule is added beside it."""
+        first, second = _passage(40, "alpha"), _passage(40, "beta")
+        answer = f"{first} {second}"
+        assert is_depth_reproduction(answer, (first, second)) is True
+
+    def test_a_passage_drawn_upon_rather_than_reproduced_is_untouched(self) -> None:
+        """Length only matters once coverage is near-complete."""
+        passage = _passage(SUBSTANTIAL_PASSAGE_WORDS + 40)
+        quoted = " ".join(passage.split()[:20])
+        assert is_depth_reproduction(quoted, (passage,)) is False
+
+
+class TestConversationExtraction:
+    """The conversation-level bound (ADR-0007 E5).
+
+    Bounds a SEQUENCE of requests using only what the request carries, so the
+    service still stores nothing between turns.
+    """
+
+    @staticmethod
+    def _sources(count: int) -> tuple[str, ...]:
+        return tuple(f"document-{index}.md" for index in range(count))
+
+    def test_a_first_turn_is_never_conversation_extraction(self) -> None:
+        passage = _passage(60)
+        assert is_conversation_extraction(passage, (passage,), ("a.md",), ()) is False
+
+    def test_a_wide_conversation_without_reproduction_is_fine(self) -> None:
+        """Breadth alone must never trigger this.
+
+        A visitor asking about six parts of a portfolio is the feature working.
+        """
+        passage = _passage(80)
+        answer = "OJ has worked across several areas, summarised in his own words."
+        prior = self._sources(CONVERSATION_SOURCE_BREADTH_MAX + 3)
+        assert is_conversation_extraction(answer, (passage,), ("z.md",), prior) is False
+
+    def test_a_narrow_conversation_with_reproduction_is_fine(self) -> None:
+        """Reproduction alone is governed by the per-request rules above."""
+        passage = _passage(60)
+        prior = self._sources(2)
+        assert (
+            is_conversation_extraction(passage, (passage,), ("z.md",), prior) is False
+        )
+
+    def test_breadth_plus_reproduction_is_extraction(self) -> None:
+        """Both conditions together are the pattern this exists to catch."""
+        passage = _passage(60)
+        prior = self._sources(CONVERSATION_SOURCE_BREADTH_MAX + 1)
+        assert is_conversation_extraction(passage, (passage,), ("z.md",), prior) is True
+
+    def test_screen_answer_replaces_a_conversation_that_is_emptying_the_corpus(
+        self,
+    ) -> None:
+        passage = _passage(60)
+        prior = self._sources(CONVERSATION_SOURCE_BREADTH_MAX + 1)
+        decided = screen_answer(passage, (passage,), ("z.md",), prior)
+
+        assert decided is not None
+        assert decided.policy == "bulk_reproduction"
+
+    def test_omitting_history_reduces_to_the_per_request_bound(self) -> None:
+        """The honest limitation, asserted rather than described.
+
+        An extractor can drop the history and evade this. Doing so puts them
+        back where they already were, which is why the control weakens nothing.
+        """
+        passage = _passage(60)
+        assert screen_answer(passage, (passage,), ("z.md",), ()) is None

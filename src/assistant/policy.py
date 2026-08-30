@@ -318,6 +318,52 @@ passage in fragments and writes between them has still reproduced the passage,
 and measuring the longest unbroken span alone misses that.
 """
 
+CONVERSATION_SOURCE_BREADTH_MAX = 5
+"""Documents a conversation may touch before reproduction is treated as extraction.
+
+The anti-extraction rules above bound a single REQUEST. Conversation (ADR-0007)
+does not change that bound, but it does make a sequence of requests one
+continuous act, which is the practical form the risk takes.
+
+This bounds the sequence without storing anything. The follow-up already carries
+the source labels of earlier turns, so the union of documents touched so far is
+computable from the request itself — no session, no database, no server-side
+state, and nothing retained after the response is written.
+
+Set against a ten-document corpus: touching six or more of them WHILE
+reproducing whole passages is the extraction pattern, and is not what a
+recruiter asking four questions looks like. Breadth alone never triggers this —
+a wide-ranging conversation is exactly what the assistant is for.
+
+**Honest limitation, stated rather than buried:** the caller supplies the
+history, so an extractor can simply omit it and start fresh. That reduces them
+to the per-request bound they already faced, so this control strictly raises the
+cost of extraction and weakens nothing. It is best-effort against a determined
+attacker and real against an ordinary one — the same framing the route-level
+rate limiter uses, and for the same reason.
+"""
+
+SUBSTANTIAL_PASSAGE_WORDS = 140
+"""Length at which reproducing ONE whole passage counts as extraction.
+
+Measured against this corpus on 30 August 2026 rather than chosen. Chunk
+lengths: median 94 words, p75 128, p90 163, longest 183.
+
+The rule this restores strictness to was retired because it rejected correct
+answers — notably the critical question "Tell me about Cited." — and the reason
+was length, not principle: when a section is short, the section largely IS the
+answer, so a good grounded answer is indistinguishable from reproduction.
+
+The passages behind those rejections measure **42, 52 and 83 words**. The
+longest passages in the corpus measure 158-183. A threshold of 140 therefore
+separates the two cases with room on both sides: every answer that forced the
+retirement stays permitted, and reproducing one of the longest passages whole
+does not.
+
+Re-measure when the corpus changes shape. A number derived from a distribution
+stops being right when the distribution moves.
+"""
+
 MIN_REPRODUCED_PASSAGES = 2
 """How many near-completely reproduced passages constitute depth extraction.
 
@@ -411,10 +457,40 @@ def passage_coverage(answer: str, passages: tuple[str, ...]) -> tuple[float, ...
     return tuple(coverages)
 
 
-def _is_depth_from_coverage(coverage: tuple[float, ...]) -> bool:
-    """Depth test over already-computed coverage, so the rule has one home."""
-    reproduced = sum(1 for value in coverage if value >= NEAR_COMPLETE_PASSAGE_COVERAGE)
-    return reproduced >= MIN_REPRODUCED_PASSAGES
+def _is_depth_from_coverage(
+    coverage: tuple[float, ...], passages: tuple[str, ...] = ()
+) -> bool:
+    """Depth test over already-computed coverage, so the rule has one home.
+
+    Two ways to fail, because "how much of the corpus did this hand over?" is
+    not answered by a passage count alone:
+
+    * **two or more** passages reproduced near-completely, at any length; or
+    * **one** passage reproduced near-completely, if that passage is
+      substantial (`SUBSTANTIAL_PASSAGE_WORDS`).
+
+    The second is the owner-approved narrowing of 30 August 2026. The rule this
+    replaced counted passages only, which meant one whole passage was always
+    free — including the longest in the corpus, where "the whole passage" is a
+    meaningful share of a document rather than the length of a good answer.
+
+    Passage lengths are optional so existing callers keep working; without them
+    the count rule applies alone, which is the previous behaviour rather than a
+    stricter guess about text the caller did not supply.
+    """
+    reproduced = [
+        index
+        for index, value in enumerate(coverage)
+        if value >= NEAR_COMPLETE_PASSAGE_COVERAGE
+    ]
+    if len(reproduced) >= MIN_REPRODUCED_PASSAGES:
+        return True
+
+    return any(
+        index < len(passages)
+        and len(passages[index].split()) >= SUBSTANTIAL_PASSAGE_WORDS
+        for index in reproduced
+    )
 
 
 def is_depth_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
@@ -428,7 +504,7 @@ def is_depth_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
     one source. See `MIN_REPRODUCED_PASSAGES` for the measurement, the rejected
     alternatives, and the one narrowing this accepts.
     """
-    return _is_depth_from_coverage(passage_coverage(answer, passages))
+    return _is_depth_from_coverage(passage_coverage(answer, passages), passages)
 
 
 def is_bulk_reproduction(
@@ -456,7 +532,7 @@ def is_bulk_reproduction(
     # Depth first: several passages reproduced near-completely is extraction
     # whatever their attribution, and the breadth count below cannot see it when
     # they share one source document.
-    if _is_depth_from_coverage(coverage):
+    if _is_depth_from_coverage(coverage, passages):
         return True
 
     substantial = [
@@ -478,18 +554,55 @@ def has_provider_self_identification(answer: str) -> bool:
     return any(pattern.search(answer) for pattern in _PROVIDER_SELF_ID)
 
 
+def is_conversation_extraction(
+    answer: str,
+    passages: tuple[str, ...],
+    sources: tuple[str, ...] | None,
+    prior_sources: tuple[str, ...],
+) -> bool:
+    """Whether this answer continues a conversation that is emptying the corpus.
+
+    Two conditions, both required:
+
+    * the conversation so far — earlier turns plus this one — has touched more
+      than `CONVERSATION_SOURCE_BREADTH_MAX` distinct documents; and
+    * THIS answer reproduces at least one passage near-completely.
+
+    Requiring both is what keeps a curious visitor out of it. Asking about six
+    parts of someone's portfolio is the feature working; asking about six parts
+    and receiving each one verbatim is not.
+    """
+    if not prior_sources:
+        return False
+
+    touched = {source for source in prior_sources if source}
+    touched.update(source for source in (sources or ()) if source)
+    if len(touched) <= CONVERSATION_SOURCE_BREADTH_MAX:
+        return False
+
+    coverage = passage_coverage(answer, passages)
+    return any(value >= NEAR_COMPLETE_PASSAGE_COVERAGE for value in coverage)
+
+
 def screen_answer(
     answer: str,
     passages: tuple[str, ...],
     sources: tuple[str, ...] | None = None,
+    prior_sources: tuple[str, ...] = (),
 ) -> PolicyResponse | None:
     """Inspect a generated answer, returning a replacement when policy requires.
 
     Bulk reproduction is checked first: an answer that dumps the corpus must be
     replaced wholesale, and whether it also mentioned a provider is beside the
     point once none of it is being shown.
+
+    `prior_sources` are the documents earlier turns of this conversation drew on,
+    as reported by the caller. Optional, so a single-turn caller is unaffected.
     """
     if is_bulk_reproduction(answer, passages, sources):
+        return PolicyResponse(Policy.BULK_REPRODUCTION, BULK_EXTRACTION_RESPONSE)
+
+    if is_conversation_extraction(answer, passages, sources, prior_sources):
         return PolicyResponse(Policy.BULK_REPRODUCTION, BULK_EXTRACTION_RESPONSE)
 
     if has_provider_self_identification(answer):

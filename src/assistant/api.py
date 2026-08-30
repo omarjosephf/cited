@@ -30,7 +30,14 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from assistant.answering import Answerer, load_system_prompt, message_creator
+from assistant.answering import (
+    MAX_HISTORY_SOURCES,
+    MAX_HISTORY_TURNS,
+    Answerer,
+    Turn,
+    load_system_prompt,
+    message_creator,
+)
 from assistant.budget import BudgetExhausted, DailyCallBudget
 from assistant.chunking import chunk_passages
 from assistant.corpus_checksum import verify_corpus
@@ -52,8 +59,27 @@ one, a single request can be arbitrarily expensive.
 limiter = Limiter(key_func=get_remote_address)
 
 
+class HistoryTurnIn(BaseModel):
+    """One earlier exchange, supplied by the caller (ADR-0007 E2).
+
+    The question and the labels of the documents that answered it. There is
+    deliberately no field for the earlier ANSWER: the shape of this model is
+    what stops generated passage text being replayed across the boundary, so
+    the constraint lives in the contract rather than in a caller's good manners.
+    """
+
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    sources: list[str] = Field(default_factory=list, max_length=MAX_HISTORY_SOURCES)
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    history: list[HistoryTurnIn] = Field(
+        default_factory=list, max_length=MAX_HISTORY_TURNS
+    )
+    """Earlier turns, oldest first. Optional in both directions on purpose: an
+    older client omits it and is answered as a first turn, and a client that
+    sends it against an older service has the field ignored (ADR-0007 E4)."""
 
 
 class CitationOut(BaseModel):
@@ -250,9 +276,16 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
             ),
         ) from None
 
+    # Mapped out of the request model rather than passed through it, so the
+    # answering layer takes its own type and never a validated-but-foreign
+    # object from the transport layer.
+    history = tuple(
+        Turn(turn.question.strip(), tuple(turn.sources)) for turn in body.history
+    )
+
     started = time.monotonic()
     try:
-        answer = state.answerer.answer(question)
+        answer = state.answerer.answer(question, history)
     except Exception:
         state.budget.refund()
         state.metrics.record("unavailable", (time.monotonic() - started) * 1000)

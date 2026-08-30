@@ -96,7 +96,23 @@ primary_region = "lhr"          # London, matching the demo and the audience
   # Cold-start latency must be measured against the real deployment before public
   # launch. If it makes the assistant feel broken, this is the setting to revisit
   # first — the fix is a running machine, and it costs about three dollars.
-  min_machines_running = 0
+  # 1, not 0, from 30 Aug 2026. Scale-to-zero looked free and was not: a stopped
+  # machine took a MEASURED 154 seconds to answer /health, because loading the
+  # ONNX embedding model and indexing 64 chunks on a throttled shared-cpu-1x
+  # slice takes 3-4 minutes (see the app logs: "Started server process" to
+  # "Application startup complete"). The portfolio route gives up after 20s
+  # (REQUEST_TIMEOUT_MS in src/lib/assistant/service.ts), so the first visitor
+  # of the day did not get a slow answer - they got "unavailable".
+  #
+  # Keeping one machine warm costs roughly the price of a coffee a month and is
+  # a stopgap, not a fix. The real fix is not needing a neural model to search
+  # 64 chunks; that work is tracked separately. Revisit this line when startup
+  # is measured in seconds, not minutes.
+  #
+  # Side benefit: DAILY_ANSWER_LIMIT is an in-process counter, so scale-to-zero
+  # silently reset the budget on every cold start. A machine that stays up makes
+  # that limit mean what it says.
+  min_machines_running = 1
 
   [http_service.concurrency]
     type = "requests"
@@ -121,11 +137,46 @@ primary_region = "lhr"          # London, matching the demo and the audience
 
 [[vm]]
   size = "shared-cpu-1x"
-  # 512 MB, measured rather than guessed: peak resident memory with the model
-  # loaded, the corpus indexed and queries served is 263 MB. Do not reduce it to
-  # save money — the failure mode is the container being killed mid-request,
-  # which surfaces as an unexplained failure rather than as anything that names
-  # its cause. The portfolio corpus is smaller than the demo's, so this has
-  # headroom; re-measure before adding documents in bulk.
-  memory = "512mb"
+  # 2 GB, measured on this app on 29 Aug 2026 — not inherited, and not guessed.
+  #
+  # This started at 512 MB, copied from fly.toml along with its "263 MB
+  # measured" figure and the claim that the portfolio corpus is smaller than the
+  # demo's. Both were wrong here. The demo indexes 2 markdown files; this
+  # indexes 10 documents including a PDF. Two deploys OOMed before the server
+  # ever finished starting, ten restarts each:
+  #
+  #   at 512 MB   Killed process 637 (uvicorn)  anon-rss:406468kB
+  #   at 1 GB     Killed process 639 (uvicorn)  anon-rss:875272kB
+  #
+  # Note it grew to roughly 85% of whatever it was given, so neither number is
+  # the requirement — both are just where that box ran out. The requirement came
+  # from a machine that actually started: at 2 GB, /proc/meminfo reports
+  # MemTotal 2015 MB against MemAvailable 934 MB once idle and serving, i.e.
+  # ~1.08 GB in use with the model loaded and 64 chunks indexed. 1 GB could not
+  # have worked; even the steady state exceeds it.
+  #
+  # So 2 GB is ~46% headroom over measured idle, chosen because the failure mode
+  # of being too tight is the container killed mid-request, which reaches a
+  # visitor as an unexplained failure rather than as anything naming its cause.
+  # The machine scales to zero, so the larger tier is billed only while awake.
+  #
+  # Worth tightening later, but only against a measured startup peak (VmHWM of
+  # the uvicorn process) rather than the idle figure above — startup is the
+  # spike that killed the first two deploys, and it is not what /proc/meminfo
+  # shows once the thing is sitting still.
+  # Trimmed 2 GB -> 1.5 GB on 30 Aug 2026, once there was a real number to trim
+  # against. VmHWM of the uvicorn process on a machine that had started, loaded
+  # the model, indexed the corpus and served questions:
+  #
+  #   /proc/639/status:VmHWM:  997260 kB   (974 MB)
+  #
+  # VmHWM is the high-water mark since process start, so it already includes the
+  # startup spike that killed the 512 MB and 1 GB deploys. That also explains
+  # why 1 GB could never have worked: the process alone wants ~975 MB, leaving
+  # nothing for the kernel.
+  #
+  # 1.5 GB is ~50% headroom over measured peak, and $8.40/month against $11.11
+  # for 2 GB. Do not trim further on this evidence: the next step down is 1 GB,
+  # which is below the measured peak and has already failed in production.
+  memory = "1536mb"
   cpus = 1

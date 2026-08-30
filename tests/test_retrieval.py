@@ -320,3 +320,68 @@ class TestModelCacheLocation:
             "the build stage must pass cache_dir explicitly: fastembed reads no "
             "environment variable of its own"
         )
+
+
+def test_the_heading_is_part_of_what_gets_embedded() -> None:
+    """Retrieval searches `indexed_text`, not `text`.
+
+    Asserted on the strings the embedder was handed rather than on a score,
+    because the failure this guards is silent: dropping the heading still
+    returns results, still cites correctly, and simply ranks worse — measured at
+    97% hit rate against 100% on the portfolio corpus.
+    """
+    embedder = BagOfWordsEmbedder()
+    InMemoryRetriever([chunk("prompt format", 0, "Formatting")], embedder)
+    assert embedder.passage_calls == [["Formatting. prompt format"]]
+
+
+def test_a_chunk_without_a_heading_is_embedded_as_it_stands() -> None:
+    embedder = BagOfWordsEmbedder()
+    InMemoryRetriever([chunk("prompt format", 0, None)], embedder)
+    assert embedder.passage_calls == [["prompt format"]]
+
+
+class TestSuppliedVectors:
+    """Vectors built ahead of time, used instead of embedding at construction."""
+
+    def test_a_supplied_matrix_skips_embedding_the_passages(self) -> None:
+        embedder = BagOfWordsEmbedder()
+        matrix = BagOfWordsEmbedder().embed_passages(["prompt prompt format"])
+        retriever = InMemoryRetriever(
+            [chunk("prompt prompt format", 0, "Format")], embedder, matrix
+        )
+
+        assert embedder.passage_calls == []
+        # The query side still runs: a question has to be embedded somehow.
+        assert retriever.search("prompt")[0].chunk.index == 0
+        assert embedder.query_calls == ["prompt"]
+
+    def test_supplied_vectors_rank_exactly_as_computed_ones_do(self) -> None:
+        chunks = [
+            chunk("prompt prompt format", 0, "Format"),
+            chunk("example example example", 1, "Examples"),
+            chunk("boxing nutrition", 2, "Unrelated"),
+        ]
+        computed = InMemoryRetriever(chunks, BagOfWordsEmbedder())
+        supplied = InMemoryRetriever(
+            chunks,
+            BagOfWordsEmbedder(),
+            BagOfWordsEmbedder().embed_passages([c.indexed_text() for c in chunks]),
+        )
+
+        for query in ("prompt format", "example", "boxing"):
+            assert [r.chunk.index for r in computed.search(query, top_k=3)] == [
+                r.chunk.index for r in supplied.search(query, top_k=3)
+            ]
+
+    def test_a_supplied_matrix_of_the_wrong_height_fails_loudly(self) -> None:
+        """The same guard as a miscounting embedder, on the same reasoning.
+
+        `vectors.py` refuses this earlier and with a better message; this is the
+        backstop for a matrix that reaches the constructor by any other route.
+        """
+        matrix = BagOfWordsEmbedder().embed_passages(["a"])
+        with pytest.raises(ValueError, match="vectors"):
+            InMemoryRetriever(
+                [chunk("a", 0), chunk("b", 1)], BagOfWordsEmbedder(), matrix
+            )

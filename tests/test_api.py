@@ -11,10 +11,14 @@ paths are the ones least likely to be exercised by hand.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -28,10 +32,14 @@ from assistant.answering import (
     Turn,
 )
 from assistant.budget import DailyCallBudget
-from assistant.chunking import Chunk
+from assistant.chunking import Chunk, chunk_passages
+from assistant.documents import read_corpus
+from assistant.embedding import MODEL_NAME
 from assistant.metrics import AssistantMetrics
 from assistant.retrieval import SearchResult
 from assistant.settings import Settings
+from assistant.vectors import VectorsMismatch
+from assistant.vectors import save as save_vectors
 
 
 def chunk(index: int = 0, section: str = "Components") -> Chunk:
@@ -641,3 +649,148 @@ class TestConversationHistory:
         assert forwarded.question == "what did he build?"
         assert not hasattr(forwarded, "answer")
         assert "portfolio platform" not in repr(forwarded)
+
+
+class TestStartup:
+    """The lifespan, run for real — with a stand-in for the embedding model.
+
+    These are the only tests here that run the lifespan. What is under test is
+    the wiring around the corpus, not the model, so a deterministic embedder
+    keeps them instant; the real model is exercised against the real corpus by
+    the evaluation harness, where quality is what is being measured.
+    """
+
+    @staticmethod
+    def _corpus(tmp_path: Path) -> Path:
+        directory = tmp_path / "corpus"
+        directory.mkdir()
+        (directory / "guide.md").write_text(
+            "# Components\n\nRole, task, context and format.\n",
+            encoding="utf-8",
+        )
+        return directory
+
+    @staticmethod
+    def _chunks(directory: Path) -> list[Chunk]:
+        return chunk_passages(read_corpus(directory))
+
+    class _Embedder:
+        """Records what it was asked to do, and announces the warm-up."""
+
+        def __init__(self) -> None:
+            self.passage_calls: list[list[str]] = []
+            self.query_calls: list[str] = []
+            self.warmed = threading.Event()
+
+        @property
+        def dimensions(self) -> int:
+            return 3
+
+        def _vector(self, text: str) -> Any:
+            seed = float(len(text) % 7 + 1)
+            return np.array([seed, 1.0, 0.0], dtype=np.float32) / seed
+
+        def embed_passages(self, texts: list[str]) -> Any:
+            self.passage_calls.append(texts)
+            if not texts:
+                return np.zeros((0, self.dimensions), dtype=np.float32)
+            return np.vstack([self._vector(t) for t in texts])
+
+        def embed_query(self, text: str) -> Any:
+            self.query_calls.append(text)
+            self.warmed.set()
+            return self._vector(text)
+
+    @pytest.fixture
+    def embedder(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        made = TestStartup._Embedder()
+        monkeypatch.setattr(api, "FastEmbedEmbedder", lambda: made)
+        return made
+
+    @pytest.fixture(autouse=True)
+    def _clean_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("CORPUS_DIR", "CORPUS_VECTORS_FILE", "CORPUS_CHECKSUM"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("REQUIRE_SHARED_SECRET", "false")
+        # The lifespan builds a provider client, which refuses to exist without
+        # a key. Nothing here calls it: these tests never reach /ask.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+
+    def test_precomputed_vectors_are_used_instead_of_embedding_the_corpus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: Any
+    ) -> None:
+        corpus = self._corpus(tmp_path)
+        chunks = self._chunks(corpus)
+        path = tmp_path / "vectors.npz"
+        save_vectors(
+            path,
+            chunks,
+            embedder.embed_passages([c.indexed_text() for c in chunks]),
+            model=MODEL_NAME,
+        )
+        embedder.passage_calls.clear()
+
+        monkeypatch.setenv("CORPUS_DIR", str(corpus))
+        monkeypatch.setenv("CORPUS_VECTORS_FILE", str(path))
+
+        with TestClient(api.app) as client:
+            assert client.get("/health").json()["chunks"] == len(chunks)
+            # The startup path did no embedding at all.
+            assert embedder.passage_calls == []
+            # ...and the model is loaded anyway, in the background, so the
+            # first visitor does not pay for it.
+            assert embedder.warmed.wait(timeout=10)
+            assert embedder.query_calls == ["warm-up"]
+
+    def test_without_a_vectors_file_the_corpus_is_embedded_at_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: Any
+    ) -> None:
+        """The default stays the behaviour that cannot be stale."""
+        corpus = self._corpus(tmp_path)
+        monkeypatch.setenv("CORPUS_DIR", str(corpus))
+
+        with TestClient(api.app) as client:
+            assert client.get("/health").json()["chunks"] > 0
+            assert embedder.passage_calls != []
+            # Nothing to warm: embedding the corpus already loaded the model.
+            assert not embedder.warmed.is_set()
+
+    def test_vectors_that_no_longer_describe_the_corpus_stop_the_service(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: Any
+    ) -> None:
+        """Fail closed. A corpus edited after its vectors were built is the
+        realistic version of this, and it is invisible from the outside: every
+        answer still arrives, cited, attributed to whichever passage now happens
+        to sit in that row.
+        """
+        corpus = self._corpus(tmp_path)
+        chunks = self._chunks(corpus)
+        path = tmp_path / "vectors.npz"
+        save_vectors(
+            path,
+            chunks,
+            embedder.embed_passages([c.indexed_text() for c in chunks]),
+            model=MODEL_NAME,
+        )
+        (corpus / "guide.md").write_text(
+            "# Components\n\nRole, task, context and something else entirely.\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CORPUS_DIR", str(corpus))
+        monkeypatch.setenv("CORPUS_VECTORS_FILE", str(path))
+
+        with (
+            pytest.raises(VectorsMismatch, match="different text"),
+            TestClient(api.app),
+        ):
+            pass
+
+    def test_a_warm_up_failure_does_not_take_the_service_down(self) -> None:
+        """An optimisation that can kill the process is not an optimisation."""
+
+        class Broken(TestStartup._Embedder):
+            def embed_query(self, text: str) -> Any:
+                raise RuntimeError("model cache is unreadable")
+
+        asyncio.run(api.warm_embedder(Broken()))

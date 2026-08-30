@@ -1,8 +1,9 @@
 """Command line entry point.
 
-Three commands, split by what they cost:
+Four commands, split by what they cost:
 
 * `index`  — read the corpus and report what retrieval will see. Free.
+* `embed`  — build the corpus vectors a deployment serves from. Free.
 * `eval`   — score retrieval against the committed question set. Free.
 * `ask`    — answer one question. Costs an API call.
 
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from assistant.chunking import chunk_passages
 from assistant.documents import read_corpus
-from assistant.embedding import FastEmbedEmbedder
+from assistant.embedding import MODEL_NAME, FastEmbedEmbedder
 from assistant.evaluation import (
     AnswerReport,
     InvalidQuestionSet,
@@ -121,6 +122,40 @@ def _print_retrieval(report: RetrievalReport) -> None:
         print(f"\n  {len(demoted)} found but not ranked first:")
         for outcome in demoted:
             print(f"    rank {outcome.rank}  {outcome.question.text}")
+
+
+def cmd_embed(args: argparse.Namespace) -> int:
+    """Build the matrix a deployment serves from, on a machine that is not throttled.
+
+    This is the whole point of the command: the work is identical wherever it
+    runs, and running it here means a container does not repeat it on every cold
+    start at a fraction of the CPU.
+    """
+    from assistant.corpus_checksum import corpus_checksum
+    from assistant.vectors import chunk_digest, save
+
+    passages = read_corpus(args.corpus)
+    if not passages:
+        raise SystemExit(f"No documents found in {args.corpus}/. Nothing to embed.")
+
+    chunks = chunk_passages(passages)
+    matrix = FastEmbedEmbedder().embed_passages(
+        [chunk.indexed_text() for chunk in chunks]
+    )
+    checksum = corpus_checksum(args.corpus)
+    save(args.out, chunks, matrix, model=MODEL_NAME, corpus_checksum=checksum)
+
+    # Printed because these are the values a deployment check compares against,
+    # and reading them out of a binary file afterwards is nobody's idea of a
+    # release step.
+    print(f"wrote {args.out}")
+    print(f"  chunks           {len(chunks)}")
+    print(f"  dimensions       {matrix.shape[1]}")
+    print(f"  model            {MODEL_NAME}")
+    print(f"  corpus           {args.corpus}")
+    print(f"  corpus checksum  {checksum}")
+    print(f"  chunk digest     {chunk_digest(chunks)}")
+    return 0
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -461,6 +496,19 @@ def main(argv: list[str] | None = None) -> int:
     index = subcommands.add_parser("index", help="inspect what retrieval will see")
     index.add_argument("--verbose", action="store_true", help="list every chunk")
     index.set_defaults(func=cmd_index)
+
+    embed = subcommands.add_parser(
+        "embed", help="build the corpus vectors a deployment serves from"
+    )
+    embed.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="destination .npz. Required rather than defaulted: this file is "
+        "read at startup, and writing one somewhere unintended is a failure "
+        "that only shows up on a deploy.",
+    )
+    embed.set_defaults(func=cmd_embed)
 
     evaluate = subcommands.add_parser("eval", help="score against the question set")
     evaluate.add_argument("--questions", type=Path, default=None)

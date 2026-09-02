@@ -4,8 +4,20 @@
 
 Use this panel to inspect Cited and OJ Assistant locally. It shows which
 documents and chunks retrieval can use, plus the active chunking, embedding and
-top-k configuration. It does not upload, edit, delete, embed, answer, deploy or
-call a provider.
+top-k configuration. It can export a standalone, printable report for the
+selected corpus. It does not upload, edit, delete, embed, answer, deploy or call
+a provider.
+
+## Start on Windows with one click
+
+Complete the README's virtual-environment setup once. After that, double-click
+`Start-RAG-Management-Panel.cmd` in the repository root. The launcher opens the
+panel in the default browser when it is ready. Keep the command window open and
+press `Ctrl+C` there when finished.
+
+The launcher intentionally does not install or update packages. If it reports a
+missing environment or dependency, follow the one-time setup in `README.md`
+instead of changing the launcher.
 
 ## Start with the normal repository layout
 
@@ -54,9 +66,21 @@ This only reads and validates the artifact. It never creates or replaces one.
 5. Point out the chunk policy, embedding model/window, top-k and clearly
    labelled estimated-token range.
 6. Point out the green local/read-only notice.
+7. Select **Download report**, open the saved HTML file and use the browser's
+   Print command or **Save as PDF** to demonstrate that it stands alone.
 
 Do not describe the two corpora as one combined index. The selector deliberately
 keeps their retrieval boundaries separate.
+
+## Download or print a report
+
+Select the corpus first, then choose **Download report**. The filename includes
+the selected corpus identifier. The saved HTML contains no scripts, remote
+assets or local filesystem paths and can be opened without the panel running.
+
+The report contains document names, checksums, retrieval settings and a preview
+of every chunk. Review it before sharing, particularly if a custom corpus is not
+public. Printing and PDF creation use the browser's standard Print command.
 
 ## Stop and refresh
 
@@ -72,5 +96,8 @@ snapshot, so stop and start it again after changing or exporting corpus files.
   prefixed files are intentionally excluded.
 - **Port already in use:** add `--port` with another local port, for example
   `--port 8766`.
+- **Launcher cannot find Python:** create the repository `.venv` using the
+  README setup. Advanced worktree users may set `DOC_ASSISTANT_PYTHON` to an
+  existing compatible virtual-environment Python executable before launching.
 - **Vectors show invalid:** rebuild only through the separately approved vector
   workflow. The inspector must not repair or overwrite them.

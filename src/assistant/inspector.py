@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from assistant.inspection import CorpusInspection
+from assistant.inspector_report import render_report
 from assistant.web_security import (
     NONCE_PLACEHOLDER,
     apply_security_headers,
@@ -78,6 +79,20 @@ def create_inspector_app(corpora: list[CorpusInspection]) -> FastAPI:
     @app.get("/api/corpora/{corpus_id}")
     async def corpus_detail(corpus_id: str) -> dict[str, Any]:
         return selected(corpus_id).detail()
+
+    @app.get("/api/corpora/{corpus_id}/report", response_class=HTMLResponse)
+    async def corpus_report(corpus_id: str) -> HTMLResponse:
+        corpus = selected(corpus_id)
+        nonce = secrets.token_urlsafe(16)
+        return HTMLResponse(
+            render_report(corpus, nonce),
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{corpus.id}-rag-management-report.html"'
+                ),
+                "Content-Security-Policy": content_security_policy(nonce),
+            },
+        )
 
     @app.get("/api/corpora/{corpus_id}/chunks")
     async def list_chunks(

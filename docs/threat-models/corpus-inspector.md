@@ -4,8 +4,8 @@
 
 `doc-assistant inspect` displays fixed corpus snapshots in a local browser. The
 assets are the corpus text, local filesystem paths, corpus/vector integrity,
-developer credentials, and the guarantee that inspection cannot spend money or
-change a corpus.
+developer credentials, downloaded reports, and the guarantee that inspection
+cannot spend money or change a corpus.
 
 It is intentionally outside the scope of public hosting, authentication,
 uploads, document editing, index generation, answering and deployment.
@@ -23,6 +23,9 @@ uploads, document editing, index generation, answering and deployment.
    could report different chunks from the ones retrieval uses.
 5. **Convenience to capability creep.** An apparently harmless button could
    introduce mutation, provider cost or production impact.
+6. **Downloaded report persistence.** A report could execute corpus-supplied
+   markup, make a remote request, reveal local paths or be shared more widely
+   than the source corpus was intended to be.
 
 ## Controls
 
@@ -41,6 +44,11 @@ uploads, document editing, index generation, answering and deployment.
 - Inspection calls the production readers, chunker and vector validator.
 - No embedding model, API credential or answer provider is loaded or called.
 - Snapshots are immutable for the lifetime of the process.
+- Report routes accept only a registered corpus identifier and return a
+  self-contained download with a safe identifier-derived filename.
+- Report content escapes every corpus-derived string and contains no script,
+  form, remote asset or link. It preserves corpus-relative source names and is
+  covered by the same no-store, no-index, CSP and browser-hardening headers.
 
 ## Residual risk and operating rule
 
@@ -49,6 +57,11 @@ The panel is therefore local-only, not an access-control boundary between users
 of a shared computer. Anyone who can view the panel can read all configured
 corpus chunks. Do not configure confidential material on an untrusted or shared
 machine.
+
+A downloaded report remains on disk after the local server stops. It contains
+document names, checksums, configuration and chunk previews. Review its contents
+before sharing it and store or delete it according to the sensitivity of the
+selected corpus.
 
 The panel must not be reverse-proxied, tunnelled, bound to a non-loopback
 interface or deployed. A public or multi-user version requires authentication,

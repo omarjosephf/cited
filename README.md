@@ -128,6 +128,12 @@ python -m venv .venv
 pip install -e ".[api,dev]"
 ```
 
+On Windows, that one-time setup enables a one-click start: double-click
+`Start-RAG-Management-Panel.cmd`. The launcher uses this repository's `.venv`,
+opens the fixed loopback address in the default browser and keeps the server in
+the visible command window until you press `Ctrl+C`. It does not install
+packages, call an AI provider or expose the panel to the network.
+
 Four of the five commands cost nothing and need no API key:
 
 ```bash
@@ -148,8 +154,11 @@ doc-assistant inspect `
 ```
 
 It shows documents, exact retrieval chunks, chunk/token ranges and retrieval
-configuration. It makes no provider call and has no upload, edit or delete
-route. See [the local inspector runbook](docs/runbooks/corpus-inspector.md).
+configuration. The selected corpus can also be downloaded as a standalone HTML
+report for printing or saving as PDF. It makes no provider call and has no
+upload, edit or delete route. See the
+[local inspector runbook](docs/runbooks/corpus-inspector.md) and the
+[instructor demonstration guide](docs/runbooks/instructor-demonstration.md).
 
 For answering, copy `.env.example` to `.env` and add an Anthropic key:
 
@@ -180,6 +189,7 @@ src/assistant/     ingestion, chunking, retrieval, answering, API and inspector
 eval/              the committed question set
 content/           the documents the demo answers from
 docs/adr/          why each decision was made
+Start-RAG-Management-Panel.cmd  one-click Windows launcher for the local panel
 ```
 
 `src/assistant/api.py` decides nothing about answers — it owns transport,

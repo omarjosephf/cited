@@ -133,6 +133,24 @@ class TestAsk:
 
 
 class TestInspect:
+    def test_windows_launcher_uses_this_checkout_and_stays_loopback_only(
+        self,
+    ) -> None:
+        launcher = Path(__file__).parents[1] / "Start-RAG-Management-Panel.cmd"
+        contents = launcher.read_text(encoding="utf-8")
+        executable_lines = [
+            line.strip()
+            for line in contents.splitlines()
+            if line.strip() and not line.strip().casefold().startswith("echo ")
+        ]
+
+        assert 'cd /d "%~dp0"' in contents
+        assert 'set "PYTHONPATH=%~dp0src"' in contents
+        assert "http://127.0.0.1:8765/" in contents
+        assert '"%PYTHON_EXE%" -m assistant.cli inspect' in contents
+        assert "--host" not in contents
+        assert not any("pip install" in line for line in executable_lines)
+
     def test_it_discovers_cited_and_deployment_corpora_and_binds_loopback(
         self,
         corpus: Path,

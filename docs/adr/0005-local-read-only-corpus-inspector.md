@@ -42,6 +42,19 @@ documentation, sets no-store/no-index and browser hardening headers, and uses a
 per-response CSP nonce. Chunk text is inserted into the page as text, never as
 HTML.
 
+The selected corpus can be downloaded as a standalone HTML report. The report
+is generated from the same immutable startup snapshot, uses corpus-relative
+source names, escapes every corpus-derived string, contains no script or remote
+asset, and is served with a download-safe filename and the same private browser
+protections. It contains a compact preview of every chunk rather than creating
+a second representation of retrieval logic.
+
+The repository also provides a Windows command launcher. It resolves the
+repository from its own location, uses the existing project virtual
+environment, fixes `PYTHONPATH` to this checkout, opens only the loopback URL
+after the panel responds and leaves the server visible so the operator can stop
+it. It does not install dependencies or add a configurable host.
+
 The default profile is `--corpus`, labelled Cited. Sibling
 `deploy/*/content` directories are discovered as additional profiles so the
 normal repository export layout presents both corpora without configuration.
@@ -59,6 +72,9 @@ other explicit local layouts.
 - Snapshots are computed at startup. A corpus change requires restarting the
   panel, which avoids mutable shared state and makes the displayed checksum
   stable for a session.
+- A downloaded report is portable and printable, but it is also a persistent
+  copy of the selected corpus inventory and previews that the operator must
+  store and share appropriately.
 - This is not a production admin console and must not be exposed publicly.
 - Upload, edit, delete, embedding and deployment controls remain deliberately
   outside this decision and require their own risk review and approval.
@@ -86,6 +102,8 @@ package manager, dependency tree or build pipeline.
 ## Rollback
 
 Stop the local process to remove all runtime effect. Reverting the `inspect`
-command, inspector modules, static page and shared header extraction restores
-the previous repository behaviour. The answering API, corpus files, vectors
-and deployment configuration are not changed by this decision.
+command, inspector/report modules, static page, Windows launcher and related
+documentation restores the previous repository behaviour. Any report already
+downloaded must be removed separately by its owner if it is no longer wanted.
+The answering API, corpus files, vectors and deployment configuration are not
+changed by this decision.

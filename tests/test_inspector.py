@@ -66,6 +66,7 @@ def test_unknown_items_are_not_found_and_writes_are_not_exposed(
     client: TestClient,
 ) -> None:
     assert client.get("/api/corpora/unknown").status_code == 404
+    assert client.get("/api/corpora/unknown/report").status_code == 404
     assert client.get("/api/corpora/cited/chunks/9999").status_code == 404
     assert client.post("/api/corpora", json={}).status_code == 405
     assert client.put("/api/corpora/cited", json={}).status_code == 405
@@ -104,6 +105,57 @@ def test_html_uses_a_fresh_csp_nonce_and_safe_dom_updates(client: TestClient) ->
     assert "innerHTML" not in first.text
     assert "outerHTML" not in first.text
     assert "insertAdjacentHTML" not in first.text
+
+
+def test_report_is_a_standalone_private_download(client: TestClient) -> None:
+    response = client.get("/api/corpora/oj-assistant/report")
+    nonce = re.search(
+        r"style-src 'nonce-([^']+)'",
+        response.headers["content-security-policy"],
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="oj-assistant-rag-management-report.html"'
+    )
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+    assert nonce is not None
+    assert f'nonce="{nonce.group(1)}"' in response.text
+    assert "OJ Assistant RAG management report" in response.text
+    assert "Retrieval configuration" in response.text
+    assert "guide.md" in response.text
+    assert "Chunk inventory" in response.text
+    assert "@media print" in response.text
+    assert "Use your browser's Print command" in response.text
+    assert "<script" not in response.text
+    assert "http://" not in response.text
+    assert "https://" not in response.text
+
+
+def test_report_escapes_corpus_text_and_never_discloses_local_paths(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "private" / "content"
+    directory.mkdir(parents=True)
+    (directory / "guide & notes.md").write_text(
+        "# <script>alert('section')</script>\n\n"
+        + ("Evidence uses <img src=x onerror=alert(1)> safely. " * 20),
+        encoding="utf-8",
+    )
+    snapshot = inspect_corpus(CorpusProfile.create("Unsafe & corpus", directory))
+    response = TestClient(create_inspector_app([snapshot])).get(
+        "/api/corpora/unsafe-corpus/report"
+    )
+
+    assert response.status_code == 200
+    assert "guide &amp; notes.md" in response.text
+    assert "&lt;script&gt;alert" in response.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in response.text
+    assert "<script>alert" not in response.text
+    assert "<img src=x" not in response.text
+    assert str(tmp_path) not in response.text
 
 
 def test_unexpected_host_is_rejected_before_routing(client: TestClient) -> None:

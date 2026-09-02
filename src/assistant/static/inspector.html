@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cited RAG Management Panel</title>
+    <style nonce="__CSP_NONCE__">
+      :root {
+        color-scheme: light dark;
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --fg: #172033;
+        --muted: #647086;
+        --line: #dce3ee;
+        --accent: #2858d8;
+        --accent-soft: #eaf0ff;
+        --success: #176b45;
+        --success-soft: #e8f7ef;
+        --danger: #9d2d2d;
+        --shadow: 0 12px 32px rgb(31 45 72 / 8%);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #10141d;
+          --panel: #181e29;
+          --fg: #eef2f8;
+          --muted: #a6b0c0;
+          --line: #303a4c;
+          --accent: #8daaff;
+          --accent-soft: #202e55;
+          --success: #72d6a5;
+          --success-soft: #173a2b;
+          --danger: #ff9b9b;
+          --shadow: none;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { width: min(1120px, calc(100% - 2rem)); margin: 0 auto 4rem; }
+      header { padding: 2.25rem 0 1rem; }
+      h1 { margin: 0 0 0.35rem; font-size: clamp(1.6rem, 4vw, 2.25rem); }
+      h2 { margin: 0; font-size: 1.15rem; }
+      h3 { margin: 0 0 0.8rem; font-size: 1rem; }
+      p { margin: 0; }
+      .lede, .muted, .fine { color: var(--muted); }
+      .fine { font-size: 0.86rem; }
+      .notice {
+        display: flex;
+        gap: 0.65rem;
+        align-items: center;
+        margin: 1.25rem 0;
+        padding: 0.8rem 1rem;
+        color: var(--success);
+        background: var(--success-soft);
+        border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+        border-radius: 10px;
+        font-weight: 650;
+      }
+      .notice::before { content: "✓"; }
+      .toolbar, .section {
+        margin-top: 1rem;
+        padding: 1.25rem;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+      }
+      .toolbar { display: flex; gap: 1rem; align-items: end; flex-wrap: wrap; }
+      .field { display: grid; gap: 0.35rem; min-width: min(100%, 18rem); }
+      .field.grow { flex: 1; }
+      label { font-weight: 650; font-size: 0.9rem; }
+      select, input, button {
+        min-height: 2.65rem;
+        padding: 0.55rem 0.75rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--fg);
+        font: inherit;
+      }
+      select, input { width: 100%; }
+      button { cursor: pointer; font-weight: 650; }
+      button.primary { border-color: var(--accent); color: white; background: #2858d8; }
+      button.secondary { color: var(--accent); }
+      button:disabled { cursor: default; opacity: 0.55; }
+      :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.8rem;
+        margin-top: 1rem;
+      }
+      .card {
+        padding: 1rem;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .card span { display: block; color: var(--muted); font-size: 0.82rem; }
+      .card strong { display: block; margin-top: 0.2rem; font-size: 1.45rem; }
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: baseline;
+        margin-bottom: 1rem;
+      }
+      .details {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.7rem 1.5rem;
+        margin: 0;
+      }
+      .details div { min-width: 0; }
+      dt { color: var(--muted); font-size: 0.82rem; }
+      dd { margin: 0.15rem 0 0; overflow-wrap: anywhere; }
+      .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; }
+      table { width: 100%; border-collapse: collapse; min-width: 660px; }
+      th, td { padding: 0.7rem 0.8rem; text-align: left; vertical-align: top; }
+      th { background: var(--bg); color: var(--muted); font-size: 0.8rem; }
+      td { border-top: 1px solid var(--line); }
+      td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+      .filters {
+        display: grid;
+        grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 2fr) auto;
+        gap: 0.75rem;
+        align-items: end;
+        margin-bottom: 1rem;
+      }
+      .pager { display: flex; gap: 0.65rem; align-items: center; margin-top: 1rem; }
+      #page-status { min-width: 8rem; text-align: center; }
+      #status { min-height: 1.5rem; margin-top: 0.75rem; color: var(--danger); }
+      dialog {
+        width: min(760px, calc(100% - 2rem));
+        max-height: 85vh;
+        padding: 0;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: 0 24px 80px rgb(0 0 0 / 30%);
+      }
+      dialog::backdrop { background: rgb(5 10 20 / 65%); }
+      .dialog-body { padding: 1.25rem; }
+      .dialog-head { display: flex; justify-content: space-between; gap: 1rem; }
+      #chunk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+      [hidden] { display: none !important; }
+      @media (max-width: 780px) {
+        .cards, .details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .filters { grid-template-columns: 1fr; }
+        .filters button { width: 100%; }
+      }
+      @media (max-width: 450px) {
+        main { width: min(100% - 1rem, 1120px); }
+        header { padding-top: 1.25rem; }
+        .cards, .details { grid-template-columns: 1fr; }
+        .toolbar, .section { padding: 1rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Cited RAG Management Panel</h1>
+        <p class="lede">Inspect the material available to retrieval before asking an AI model.</p>
+        <div class="notice">Local and read-only — this panel cannot upload, edit, delete, embed, or answer.</div>
+      </header>
+
+      <section class="toolbar" aria-labelledby="corpus-heading">
+        <div class="field grow">
+          <label id="corpus-heading" for="corpus">Corpus</label>
+          <select id="corpus"></select>
+        </div>
+        <p class="fine">Switching corpora changes only the inspection view.</p>
+      </section>
+      <p id="status" role="status" aria-live="polite"></p>
+
+      <section aria-label="Corpus overview">
+        <div class="cards">
+          <div class="card"><span>Documents</span><strong id="documents-count">—</strong></div>
+          <div class="card"><span>Passages</span><strong id="passages-count">—</strong></div>
+          <div class="card"><span>Chunks</span><strong id="chunks-count">—</strong></div>
+          <div class="card"><span>Embedding model</span><strong id="model-name">—</strong></div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="configuration-heading">
+        <div class="section-head">
+          <h2 id="configuration-heading">Retrieval configuration</h2>
+          <span class="fine" id="corpus-label"></span>
+        </div>
+        <dl class="details">
+          <div><dt>Chunk policy</dt><dd id="chunk-policy">—</dd></div>
+          <div><dt>Chunk size range</dt><dd id="word-range">—</dd></div>
+          <div><dt>Estimated embedding tokens</dt><dd id="token-range">—</dd></div>
+          <div><dt>Embedding dimensions / window</dt><dd id="embedding-shape">—</dd></div>
+          <div><dt>Default retrieval count</dt><dd id="top-k">—</dd></div>
+          <div><dt>Vectors check</dt><dd id="vectors">—</dd></div>
+          <div><dt>Corpus checksum</dt><dd id="checksum">—</dd></div>
+        </dl>
+        <p class="fine" id="token-note"></p>
+      </section>
+
+      <section class="section" aria-labelledby="documents-heading">
+        <div class="section-head">
+          <h2 id="documents-heading">Documents</h2>
+          <span class="fine">Source names are corpus-relative; local paths are never exposed.</span>
+        </div>
+        <div class="table-wrap" role="region" aria-label="Documents table" tabindex="0">
+          <table>
+            <thead><tr><th>Source</th><th>Format</th><th>Status</th><th>Passages</th><th>Chunks</th><th>Est. indexed tokens</th><th>Chunk token range</th><th>SHA-256</th><th>Locations</th></tr></thead>
+            <tbody id="documents-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="chunks-heading">
+        <div class="section-head">
+          <h2 id="chunks-heading">Chunks</h2>
+          <span class="fine">The exact units available to retrieval.</span>
+        </div>
+        <form id="filters" class="filters">
+          <div class="field">
+            <label for="source">Source</label>
+            <select id="source"><option value="">All documents</option></select>
+          </div>
+          <div class="field">
+            <label for="search">Search chunk text</label>
+            <input id="search" type="search" maxlength="200" autocomplete="off" />
+          </div>
+          <button class="primary" type="submit">Filter chunks</button>
+        </form>
+        <div class="table-wrap" role="region" aria-label="Chunks table" tabindex="0">
+          <table>
+            <thead><tr><th>#</th><th>Source and location</th><th>Words</th><th>Est. tokens</th><th>Preview</th><th>Action</th></tr></thead>
+            <tbody id="chunks-body"></tbody>
+          </table>
+        </div>
+        <nav class="pager" aria-label="Chunk pages">
+          <button id="previous" class="secondary" type="button">Previous</button>
+          <span id="page-status" class="fine">Page 1</span>
+          <button id="next" class="secondary" type="button">Next</button>
+        </nav>
+      </section>
+    </main>
+
+    <dialog id="chunk-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-body">
+        <div class="dialog-head">
+          <div><h2 id="dialog-title">Chunk</h2><p id="chunk-citation" class="muted"></p></div>
+          <button id="close-dialog" class="secondary" type="button">Close</button>
+        </div>
+        <hr />
+        <p id="chunk-text"></p>
+      </div>
+    </dialog>
+
+    <script nonce="__CSP_NONCE__">
+      "use strict";
+      const byId = (id) => document.getElementById(id);
+      const state = { corpus: "", detail: null, page: 1, pageSize: 20, total: 0 };
+
+      function setText(id, value) { byId(id).textContent = String(value); }
+      function rangeText(range, unit) {
+        return `${range.minimum}–${range.maximum} ${unit} (average ${range.average}, median ${range.median})`;
+      }
+      function cell(value, className = "") {
+        const item = document.createElement("td");
+        item.textContent = String(value);
+        item.className = className;
+        return item;
+      }
+      async function getJson(path) {
+        const response = await fetch(path, { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error(`Request failed (${response.status}).`);
+        return response.json();
+      }
+      function showError(error) {
+        setText("status", error instanceof Error ? error.message : "Could not load the panel.");
+      }
+      function clearError() { setText("status", ""); }
+
+      async function loadCorpora() {
+        clearError();
+        const payload = await getJson("/api/corpora");
+        const selector = byId("corpus");
+        const options = payload.corpora.map((corpus) => {
+          const option = document.createElement("option");
+          option.value = corpus.id;
+          option.textContent = corpus.label;
+          return option;
+        });
+        selector.replaceChildren(...options);
+        state.corpus = payload.corpora[0].id;
+        await loadDetail();
+      }
+
+      function renderOverview(detail) {
+        setText("documents-count", detail.document_count);
+        setText("passages-count", detail.passage_count);
+        setText("chunks-count", detail.chunk_count);
+        setText("model-name", detail.embedding.model.split("/").at(-1));
+        setText("corpus-label", detail.label);
+        setText("chunk-policy", `${detail.chunking.target_words} target words (~${detail.chunking.estimated_target_tokens} tokens), ${detail.chunking.overlap_words}-word overlap (~${detail.chunking.estimated_overlap_tokens} tokens), ${detail.chunking.minimum_words}-word minimum (~${detail.chunking.estimated_minimum_tokens} tokens)`);
+        setText("word-range", rangeText(detail.chunk_words, "words"));
+        setText("token-range", rangeText(detail.estimated_embedding_tokens, "estimated tokens"));
+        setText("embedding-shape", `${detail.embedding.dimensions} dimensions / ${detail.embedding.window_tokens} token window`);
+        setText("top-k", `Top ${detail.retrieval.default_top_k} chunks`);
+        setText("vectors", `${detail.vectors.state.replace("_", " ")} — ${detail.vectors.message}`);
+        setText("checksum", detail.checksum);
+        setText("token-note", detail.embedding.token_measurement);
+      }
+
+      function renderDocuments(documents) {
+        const rows = documents.map((documentInfo) => {
+          const row = document.createElement("tr");
+          const locations = documentInfo.pages.length
+            ? `${documentInfo.pages.length} page(s)`
+            : `${documentInfo.sections.length} section(s)`;
+          const tokenRange = documentInfo.estimated_chunk_tokens
+            ? rangeText(documentInfo.estimated_chunk_tokens, "tokens")
+            : "—";
+          row.append(
+            cell(documentInfo.source), cell(documentInfo.format.toUpperCase()),
+            cell(documentInfo.status.replaceAll("_", " ")),
+            cell(documentInfo.passage_count, "numeric"),
+            cell(documentInfo.chunk_count, "numeric"),
+            cell(documentInfo.estimated_embedding_tokens, "numeric"),
+            cell(tokenRange), cell(`${documentInfo.sha256.slice(0, 12)}…`),
+            cell(locations)
+          );
+          return row;
+        });
+        byId("documents-body").replaceChildren(...rows);
+
+        const first = document.createElement("option");
+        first.value = "";
+        first.textContent = "All documents";
+        const options = documents.map((item) => {
+          const option = document.createElement("option");
+          option.value = item.source;
+          option.textContent = item.source;
+          return option;
+        });
+        byId("source").replaceChildren(first, ...options);
+      }
+
+      async function loadDetail() {
+        clearError();
+        state.page = 1;
+        state.detail = await getJson(`/api/corpora/${encodeURIComponent(state.corpus)}`);
+        renderOverview(state.detail);
+        renderDocuments(state.detail.documents);
+        await loadChunks();
+      }
+
+      function renderChunks(payload) {
+        const rows = payload.items.map((chunk) => {
+          const row = document.createElement("tr");
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "secondary view-chunk";
+          button.dataset.chunk = chunk.index;
+          button.textContent = "View";
+          const action = document.createElement("td");
+          action.append(button);
+          row.append(
+            cell(chunk.index, "numeric"), cell(chunk.citation),
+            cell(chunk.body_words, "numeric"),
+            cell(chunk.estimated_embedding_tokens, "numeric"),
+            cell(chunk.preview), action
+          );
+          return row;
+        });
+        byId("chunks-body").replaceChildren(...rows);
+        state.total = payload.total;
+        const pages = Math.max(1, Math.ceil(payload.total / state.pageSize));
+        setText("page-status", `Page ${state.page} of ${pages} · ${payload.total} chunks`);
+        byId("previous").disabled = state.page <= 1;
+        byId("next").disabled = state.page >= pages;
+      }
+
+      async function loadChunks() {
+        clearError();
+        const query = new URLSearchParams({
+          page: state.page,
+          page_size: state.pageSize,
+          source: byId("source").value,
+          q: byId("search").value.trim()
+        });
+        const payload = await getJson(`/api/corpora/${encodeURIComponent(state.corpus)}/chunks?${query}`);
+        renderChunks(payload);
+      }
+
+      async function showChunk(index) {
+        clearError();
+        const chunk = await getJson(`/api/corpora/${encodeURIComponent(state.corpus)}/chunks/${encodeURIComponent(index)}`);
+        setText("dialog-title", `Chunk ${chunk.index}`);
+        setText("chunk-citation", `${chunk.citation} · ${chunk.body_words} words · ${chunk.estimated_embedding_tokens} estimated tokens`);
+        setText("chunk-text", chunk.text);
+        byId("chunk-dialog").showModal();
+      }
+
+      byId("corpus").addEventListener("change", async (event) => {
+        state.corpus = event.target.value;
+        try { await loadDetail(); } catch (error) { showError(error); }
+      });
+      byId("filters").addEventListener("submit", async (event) => {
+        event.preventDefault(); state.page = 1;
+        try { await loadChunks(); } catch (error) { showError(error); }
+      });
+      byId("previous").addEventListener("click", async () => {
+        if (state.page > 1) state.page -= 1;
+        try { await loadChunks(); } catch (error) { showError(error); }
+      });
+      byId("next").addEventListener("click", async () => {
+        state.page += 1;
+        try { await loadChunks(); } catch (error) { showError(error); }
+      });
+      byId("chunks-body").addEventListener("click", async (event) => {
+        const button = event.target.closest(".view-chunk");
+        if (!button) return;
+        try { await showChunk(button.dataset.chunk); } catch (error) { showError(error); }
+      });
+      byId("close-dialog").addEventListener("click", () => byId("chunk-dialog").close());
+      loadCorpora().catch(showError);
+    </script>
+  </body>
+</html>

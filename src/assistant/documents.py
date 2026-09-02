@@ -241,13 +241,27 @@ def read_corpus(directory: Path) -> list[Passage]:
     about what "in order" means.
     """
     passages: list[Passage] = []
-    for path in sorted(
-        directory.rglob("*"), key=lambda p: p.relative_to(directory).as_posix()
-    ):
-        if not is_corpus_document(path):
-            continue
+    for path in corpus_documents(directory):
         # POSIX separators so a citation reads the same on every platform;
         # a Windows-generated index should not cite "api\guide.md".
         source = path.relative_to(directory).as_posix()
         passages.extend(read_document(path, source))
     return passages
+
+
+def corpus_documents(directory: Path) -> list[Path]:
+    """Return the files retrieval will read, in its exact deterministic order.
+
+    Keeping this enumeration public lets read-only tooling describe the corpus
+    without reimplementing the inclusion and ordering rules. A management view
+    that lists different files from retrieval would be worse than no view: it
+    would make an omitted document look indexed.
+    """
+    return [
+        path
+        for path in sorted(
+            directory.rglob("*"),
+            key=lambda candidate: candidate.relative_to(directory).as_posix(),
+        )
+        if is_corpus_document(path)
+    ]

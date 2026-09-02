@@ -1,10 +1,11 @@
 """Command line entry point.
 
-Four commands, split by what they cost:
+Five commands, split by what they cost:
 
 * `index`  — read the corpus and report what retrieval will see. Free.
 * `embed`  — build the corpus vectors a deployment serves from. Free.
 * `eval`   — score retrieval against the committed question set. Free.
+* `inspect` — open a local, read-only corpus management panel. Free.
 * `ask`    — answer one question. Costs an API call.
 
 The free commands come first deliberately. Most of what goes wrong in a
@@ -30,10 +31,12 @@ from assistant.evaluation import (
     evaluate_retrieval,
     load_questions,
 )
+from assistant.inspection import CorpusProfile
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
 
 DEFAULT_CORPUS = Path("content")
+DEFAULT_INSPECTOR_PORT = 8765
 
 _EST_INPUT_TOKENS = 2500
 """Rough input size per call: top-k passages, the system prompt and a question.
@@ -483,6 +486,88 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _named_path(value: str) -> tuple[str, Path]:
+    """Parse a human-readable LABEL=PATH option without touching the path."""
+    label, separator, raw_path = value.partition("=")
+    if not separator or not label.strip() or not raw_path.strip():
+        raise argparse.ArgumentTypeError("expected LABEL=PATH")
+    return label.strip(), Path(raw_path.strip())
+
+
+def _deployment_label(name: str) -> str:
+    words = name.replace("_", "-").split("-")
+    acronyms = {"oj": "OJ", "rag": "RAG"}
+    return " ".join(acronyms.get(word.casefold(), word.title()) for word in words)
+
+
+def _inspector_profiles(args: argparse.Namespace) -> list[CorpusProfile]:
+    """Resolve fixed startup profiles; browser input can never select a path."""
+    from assistant.inspection import InspectionError
+
+    configured: list[tuple[str, Path]] = list(args.corpus_profile)
+    if not configured:
+        configured.append(("Cited", args.corpus))
+        deployments = args.corpus.parent / "deploy"
+        if deployments.is_dir():
+            for content in sorted(deployments.glob("*/content")):
+                if content.is_dir():
+                    configured.append((_deployment_label(content.parent.name), content))
+
+    vectors_by_id: dict[str, Path] = {}
+    for label, path in args.vectors:
+        profile_id = CorpusProfile.create(label, Path(".")).id
+        if profile_id in vectors_by_id:
+            raise InspectionError(f"Duplicate vectors label: {label}")
+        vectors_by_id[profile_id] = path
+
+    profiles = [
+        CorpusProfile.create(
+            label,
+            path,
+            vectors_by_id.get(CorpusProfile.create(label, path).id),
+        )
+        for label, path in configured
+    ]
+    profile_ids = {profile.id for profile in profiles}
+    unknown_vectors = sorted(set(vectors_by_id) - profile_ids)
+    if unknown_vectors:
+        raise InspectionError(
+            "Vectors were supplied for an unknown corpus label: "
+            + ", ".join(unknown_vectors)
+        )
+    if len(profile_ids) != len(profiles):
+        raise InspectionError("Corpus labels must produce unique identifiers.")
+    return profiles
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Start the free, loopback-only read-only inspection interface."""
+    import uvicorn
+
+    from assistant.inspection import InspectionError, inspect_corpus
+    from assistant.inspector import create_inspector_app
+
+    try:
+        profiles = _inspector_profiles(args)
+        snapshots = [inspect_corpus(profile) for profile in profiles]
+    except InspectionError as error:
+        print(f"Cannot start inspector: {error}", file=sys.stderr)
+        return 2
+
+    url = f"http://127.0.0.1:{args.port}"
+    labels = ", ".join(snapshot.label for snapshot in snapshots)
+    print(f"Cited RAG Management Panel: {url}")
+    print(f"Corpora: {labels}")
+    print("Read-only and local to this computer. Press Ctrl+C to stop.")
+    uvicorn.run(
+        create_inspector_app(snapshots),
+        host="127.0.0.1",
+        port=args.port,
+        log_level="info",
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="doc-assistant",
@@ -561,6 +646,37 @@ def main(argv: list[str] | None = None) -> int:
     ask = subcommands.add_parser("ask", help="answer one question (costs an API call)")
     ask.add_argument("question")
     ask.set_defaults(func=cmd_ask)
+
+    inspect = subcommands.add_parser(
+        "inspect", help="open the local, read-only RAG management panel"
+    )
+    inspect.add_argument(
+        "--corpus-profile",
+        action="append",
+        type=_named_path,
+        default=[],
+        metavar="LABEL=PATH",
+        help=(
+            "corpus to show; repeat for multiple corpora. By default, uses "
+            "--corpus as Cited and discovers deploy/*/content directories"
+        ),
+    )
+    inspect.add_argument(
+        "--vectors",
+        action="append",
+        type=_named_path,
+        default=[],
+        metavar="LABEL=PATH",
+        help="optional vectors file to validate for a matching corpus label",
+    )
+    inspect.add_argument(
+        "--port",
+        type=int,
+        choices=range(1, 65536),
+        default=DEFAULT_INSPECTOR_PORT,
+        metavar="PORT",
+    )
+    inspect.set_defaults(func=cmd_inspect)
 
     args = parser.parse_args(argv)
     result: int = args.func(args)

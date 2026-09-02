@@ -23,6 +23,8 @@ Vector = NDArray[np.float32]
 """An L2-normalised embedding. Normalisation makes cosine similarity a dot product."""
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIMENSIONS = 384
+EMBEDDING_WINDOW_TOKENS = 512
 
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 """Prepended to queries only — never to passages.
@@ -103,7 +105,7 @@ class FastEmbedEmbedder:
 
     @property
     def dimensions(self) -> int:
-        return 384  # bge-small-en-v1.5
+        return EMBEDDING_DIMENSIONS
 
     def _encode(self, texts: list[str]) -> NDArray[np.float32]:
         model = self._loaded()

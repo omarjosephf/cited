@@ -128,20 +128,38 @@ python -m venv .venv
 pip install -e ".[api,dev]"
 ```
 
-Three of the four commands cost nothing and need no API key:
+Four of the five commands cost nothing and need no API key:
 
 ```bash
 doc-assistant index               # what retrieval will see
 doc-assistant index --verbose     # every chunk and its citation
-doc-assistant eval --retrieval-only
+doc-assistant eval                # retrieval only unless --paid is explicit
+doc-assistant inspect             # local read-only management panel
 ```
+
+The panel automatically offers the main Cited corpus and exported
+`deploy/*/content` corpora such as OJ Assistant. For an isolated worktree or a
+different local layout, select both explicitly:
+
+```powershell
+doc-assistant inspect `
+  --corpus-profile "Cited=content" `
+  --corpus-profile "OJ Assistant=C:\path\to\oj-assistant\content"
+```
+
+It shows documents, exact retrieval chunks, chunk/token ranges and retrieval
+configuration. It makes no provider call and has no upload, edit or delete
+route. See [the local inspector runbook](docs/runbooks/corpus-inspector.md).
 
 For answering, copy `.env.example` to `.env` and add an Anthropic key:
 
 ```bash
 doc-assistant ask "What are the four components of a well-formed prompt?"
-doc-assistant eval                # adds answering and refusal scores
+doc-assistant eval --paid --max-paid-calls 15 --reason "owner-approved review"
 ```
+
+The second command makes provider calls; `--paid` and a hard call ceiling are
+deliberately required. Plain `doc-assistant eval` remains retrieval-only.
 
 Then the web service:
 
@@ -158,7 +176,7 @@ into `content/`. Subdirectories are read, and citations use the path relative to
 ## Repository layout
 
 ```text
-src/assistant/     ingestion, chunking, embeddings, retrieval, answering, API
+src/assistant/     ingestion, chunking, retrieval, answering, API and inspector
 eval/              the committed question set
 content/           the documents the demo answers from
 docs/adr/          why each decision was made

@@ -48,6 +48,8 @@ from assistant.metrics import AssistantMetrics
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
 from assistant.vectors import load as load_vectors
+from assistant.web_security import NONCE_PLACEHOLDER as NONCE_PLACEHOLDER
+from assistant.web_security import apply_security_headers, content_security_policy
 
 logger = logging.getLogger(__name__)
 
@@ -374,54 +376,9 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     )
 
 
-SECURITY_HEADERS = {
-    # Two years, because a shorter max-age leaves a window where a downgrade
-    # attack still works. Fly terminates TLS and redirects, but a header is what
-    # stops the *first* request going out over HTTP next time.
-    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
-    # Without this a response the browser thinks might be script is treated as
-    # script. Cheap, and there is no case where sniffing helps us.
-    "X-Content-Type-Options": "nosniff",
-    # Legacy twin of frame-ancestors, for anything that predates CSP.
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
-    # Nothing here uses any of these, so none should be reachable.
-    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()",
-}
-
-NONCE_PLACEHOLDER = "__CSP_NONCE__"
-"""Substituted per response. A marker in the markup, never a real value."""
-
-
 def _csp(nonce: str | None) -> str:
-    """The policy, tightened as far as this page allows.
-
-    `default-src 'none'` rather than `'self'`: the deny-by-default version means
-    a directive that is missing fails closed. Every source below is one this
-    page provably needs.
-
-    The inline <style> and <script> carry a per-request nonce instead of
-    'unsafe-inline'. They are the page's own code, but 'unsafe-inline' would
-    also authorise anything injected into the markup later, which is the exact
-    attack CSP exists to stop.
-    """
-    script = f"'nonce-{nonce}'" if nonce else "'none'"
-    style = f"'nonce-{nonce}'" if nonce else "'none'"
-    return "; ".join(
-        [
-            "default-src 'none'",
-            f"script-src {script}",
-            f"style-src {style}",
-            # The page posts to /ask on its own origin and nowhere else.
-            "connect-src 'self'",
-            "img-src 'self' data:",
-            "base-uri 'none'",
-            "form-action 'none'",
-            "frame-ancestors 'none'",
-            "object-src 'none'",
-            "upgrade-insecure-requests",
-        ]
-    )
+    """Compatibility name retained for the existing API and its tests."""
+    return content_security_policy(nonce)
 
 
 @app.middleware("http")
@@ -433,11 +390,7 @@ async def security_headers(request: Request, call_next: Any) -> Any:
     rather than by us.
     """
     response = await call_next(request)
-    for header, value in SECURITY_HEADERS.items():
-        response.headers.setdefault(header, value)
-    # The HTML route sets its own policy carrying that response's nonce; a
-    # nonce reused across responses is no better than no nonce at all.
-    response.headers.setdefault("Content-Security-Policy", _csp(None))
+    apply_security_headers(response)
     return response
 
 

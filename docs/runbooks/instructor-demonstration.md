@@ -1,4 +1,4 @@
-# Instructor demonstration: Cited RAG Management Panel
+# Demonstration: Cited RAG Management Panel
 
 ## Objective
 

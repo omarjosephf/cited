@@ -53,6 +53,26 @@ tuple. `strict` is what forces them to be tested together.
 The only person able to bypass protection is the only person who commits, so
 without it the control is advisory against the one account it needs to bind.
 
+## Provenance
+
+This configuration was not written from scratch. It already existed in the
+working tree as uncommitted work, with the same required checks and the same
+`strict` and `enforce_admins` choices — the decisions recorded above were already
+made, and are preserved here rather than invented.
+
+One key changed. The earlier version also carried `"contexts": []` alongside
+`checks`, and the API accepts one or the other:
+
+```text
+422 Invalid request.
+For 'anyOf/1', {"contexts" => [], "checks" => [...], "strict" => true} is not a null.
+```
+
+Removing that empty key is the whole of the difference, and it is what let the
+configuration actually be applied. The same defect existed in the sibling
+portfolio repository's copy, which suggests a shared template rather than a
+one-off slip — worth knowing if this file is ever used as a starting point again.
+
 ## Why this file is worth keeping
 
 Recording a configuration is not the same as applying one. The sibling portfolio

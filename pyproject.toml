@@ -50,6 +50,10 @@ packages = ["src/assistant"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Tests import from scripts/ (test_model_lock imports scripts.prepare_model).
+# Bare `pytest` does not put the project root on sys.path the way
+# `python -m pytest` does, so CI failed to collect while local runs passed.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 88

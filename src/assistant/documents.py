@@ -224,13 +224,44 @@ def read_corpus(directory: Path) -> list[Passage]:
     Non-content files are skipped rather than fatal: a corpus folder accumulates
     a README, a stray image, an editor backup. A *supported* content file that
     fails to parse is a real problem and is allowed to raise.
+
+    **Sorted by the corpus-relative POSIX path, not by `Path`.** `sorted()` on
+    `Path` objects orders them the way the local platform does, and Windows
+    compares paths case-insensitively while Linux does not. This corpus contains
+    `OJ_Florendo_Rayatchi_Public_CV.pdf`: it sorts sixth on the development
+    machine and *first* in the Linux container, so the two produce different
+    document orders from identical bytes.
+
+    That was invisible while the corpus was only ever read and used inside one
+    process — order set `Chunk.index` and nothing else. It stopped being
+    invisible when `vectors.py` began binding a matrix to the order of the
+    chunks it embedded: a matrix built on one platform then looked up on another
+    describes different rows. Sorting on the relative POSIX path is also the key
+    `corpus_checksum.file_digests` already uses, so the two modules now agree
+    about what "in order" means.
     """
     passages: list[Passage] = []
-    for path in sorted(directory.rglob("*")):
-        if not is_corpus_document(path):
-            continue
+    for path in corpus_documents(directory):
         # POSIX separators so a citation reads the same on every platform;
         # a Windows-generated index should not cite "api\guide.md".
         source = path.relative_to(directory).as_posix()
         passages.extend(read_document(path, source))
     return passages
+
+
+def corpus_documents(directory: Path) -> list[Path]:
+    """Return the files retrieval will read, in its exact deterministic order.
+
+    Keeping this enumeration public lets read-only tooling describe the corpus
+    without reimplementing the inclusion and ordering rules. A management view
+    that lists different files from retrieval would be worse than no view: it
+    would make an omitted document look indexed.
+    """
+    return [
+        path
+        for path in sorted(
+            directory.rglob("*"),
+            key=lambda candidate: candidate.relative_to(directory).as_posix(),
+        )
+        if is_corpus_document(path)
+    ]

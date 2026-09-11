@@ -132,6 +132,81 @@ class TestAsk:
         assert "index" in error and "eval" in error
 
 
+class TestInspect:
+    def test_windows_launcher_uses_this_checkout_and_stays_loopback_only(
+        self,
+    ) -> None:
+        launcher = Path(__file__).parents[1] / "Start-RAG-Management-Panel.cmd"
+        contents = launcher.read_text(encoding="utf-8")
+        executable_lines = [
+            line.strip()
+            for line in contents.splitlines()
+            if line.strip() and not line.strip().casefold().startswith("echo ")
+        ]
+
+        assert 'cd /d "%~dp0"' in contents
+        assert 'set "PYTHONPATH=%~dp0src"' in contents
+        assert "http://127.0.0.1:8765/" in contents
+        assert '"%PYTHON_EXE%" -m assistant.cli inspect' in contents
+        assert "--host" not in contents
+        assert not any("pip install" in line for line in executable_lines)
+
+    def test_it_discovers_cited_and_deployment_corpora_and_binds_loopback(
+        self,
+        corpus: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        deployed = corpus.parent / "deploy" / "oj-assistant" / "content"
+        deployed.mkdir(parents=True)
+        (deployed / "profile.md").write_text(
+            "# Profile\n\n" + "Portfolio evidence sentence. " * 30,
+            encoding="utf-8",
+        )
+        called: dict[str, object] = {}
+
+        def fake_run(app: object, **options: object) -> None:
+            called.update(app=app, **options)
+
+        monkeypatch.setattr("uvicorn.run", fake_run)
+
+        result = cli.main(["--corpus", str(corpus), "inspect", "--port", "9876"])
+
+        assert result == 0
+        assert called["host"] == "127.0.0.1"
+        assert called["port"] == 9876
+        output = capsys.readouterr().out
+        assert "Cited, OJ Assistant" in output
+        assert "Read-only" in output
+
+    def test_explicit_profiles_support_two_corpora(
+        self, corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        second = tmp_path / "other"
+        second.mkdir()
+        (second / "other.md").write_text(
+            "# Other\n\n" + "Another documented sentence. " * 30,
+            encoding="utf-8",
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(
+            "uvicorn.run", lambda app, **options: called.update(app=app, **options)
+        )
+
+        code = cli.main(
+            [
+                "inspect",
+                "--corpus-profile",
+                f"Cited={corpus}",
+                "--corpus-profile",
+                f"OJ Assistant={second}",
+            ]
+        )
+
+        assert code == 0
+        assert called["host"] == "127.0.0.1"
+
+
 class TestEvalIsFreeUnlessPaidIsRequested:
     """The command-line guarantee: a key alone can never start spending.
 

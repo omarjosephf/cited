@@ -232,3 +232,20 @@ def test_chunk_is_hashable_and_frozen() -> None:
     assert hash(chunk)
     with pytest.raises(AttributeError):
         chunk.text = "changed"  # type: ignore[misc]
+
+
+def test_indexed_text_puts_the_heading_in_front_of_the_body() -> None:
+    """What retrieval searches, as distinct from what a citation quotes."""
+    chunk = Chunk(
+        text="He works there now.",
+        source="experience.md",
+        page=None,
+        section="Where OJ works now",
+        index=0,
+    )
+    assert chunk.indexed_text() == "Where OJ works now. He works there now."
+
+
+def test_indexed_text_of_an_unheaded_chunk_is_its_body() -> None:
+    chunk = Chunk(text="Body only.", source="doc.md", page=None, section=None, index=0)
+    assert chunk.indexed_text() == "Body only."

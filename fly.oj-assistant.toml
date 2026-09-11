@@ -51,6 +51,20 @@ primary_region = "lhr"          # London, matching the demo and the audience
   # value in the release notes — it takes precedence — and compare /health.
   CORPUS_CHECKSUM_FILE = "/app/deploy/oj-assistant/CHECKSUM"
 
+  # The corpus embedded at image-build time, so a start does not repeat it.
+  # Embedding these 64 chunks was 7.4s of an 8.4s cold start on a development
+  # machine and three to four minutes on this one; reading the matrix instead
+  # takes 0.2s. The model is still loaded, for questions rather than for
+  # passages, on a background task once the service is already answering health
+  # checks.
+  #
+  # This file is built from the corpus in the image, so the pair cannot drift by
+  # omission — and if they drift any other way, the service refuses to start
+  # rather than serving answers whose citations point at the wrong passages. A
+  # digest mismatch here means rebuild the image, never "unset this and carry
+  # on".
+  CORPUS_VECTORS_FILE = "/opt/vectors/oj-assistant.npz"
+
   # This deployment's own voice and scope. Without it the service answers as a
   # generic document assistant, which is accurate and completely characterless.
   SYSTEM_PROMPT_FILE = "/app/deploy/oj-assistant/system-prompt.md"

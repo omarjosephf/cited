@@ -30,6 +30,28 @@ Two properties matter for reasoning about its security:
 - **The user controls only the question.** Questions are treated as data, never
   as instructions, and this is stated explicitly in the system prompt.
 
+## Local corpus inspector
+
+`doc-assistant inspect` is a separate, free, read-only view of configured
+corpora. It binds only to `127.0.0.1`, accepts only loopback Host values and
+exposes GET routes only. Corpus paths are fixed at process startup and APIs
+return only corpus-relative source names. Document content is inserted into the
+page as text under a restrictive Content Security Policy, not interpreted as
+HTML.
+
+The inspector does not load the embedding model or an API credential, call the
+answer provider, modify documents, build vectors or deploy anything. It is not
+an authenticated administration service and **must not be exposed publicly,
+tunnelled or reverse-proxied**. Other processes and users with access to the
+same computer may be able to reach a loopback service and read the configured
+chunks. See [its threat model](docs/threat-models/corpus-inspector.md).
+
+The panel can download a standalone report for the selected corpus. Dynamic
+content is HTML-escaped, the file has no script or remote asset, and local paths
+are excluded. The report still contains document names, checksums and chunk
+previews, so treat the downloaded file as a copy of corpus information and
+review it before sharing.
+
 ## Known limitations
 
 Stated plainly, because a security policy that lists only strengths is

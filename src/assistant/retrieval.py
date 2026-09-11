@@ -51,16 +51,29 @@ class Retriever(Protocol):
 class InMemoryRetriever:
     """Exhaustive cosine search over an in-memory embedding matrix.
 
-    Embeddings are computed once at construction. That is the right trade for a
-    corpus that changes only at deploy time: indexing cost is paid on startup,
-    and every query afterwards is a single matrix multiply.
+    Embeddings are computed once at construction, or supplied. A corpus that
+    changes only at deploy time need not be embedded at every start: passing
+    `matrix` uses vectors built earlier — see `vectors.py`, which owns the
+    checks that decide whether a stored matrix still describes these chunks.
+    Computing them here stays the default, because it is the behaviour that
+    cannot be wrong.
     """
 
-    def __init__(self, chunks: list[Chunk], embedder: Embedder) -> None:
+    def __init__(
+        self,
+        chunks: list[Chunk],
+        embedder: Embedder,
+        matrix: NDArray[np.float32] | None = None,
+    ) -> None:
         self._chunks = chunks
         self._embedder = embedder
-        self._matrix: NDArray[np.float32] = embedder.embed_passages(
-            [chunk.text for chunk in chunks]
+        # `indexed_text`, not `text`: the heading is part of what gets searched,
+        # and a matrix built from one and queried against the other would rank
+        # everything slightly wrong while looking entirely normal.
+        self._matrix: NDArray[np.float32] = (
+            matrix
+            if matrix is not None
+            else embedder.embed_passages([chunk.indexed_text() for chunk in chunks])
         )
 
         if self._matrix.shape[0] != len(chunks):

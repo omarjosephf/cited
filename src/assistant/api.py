@@ -15,6 +15,7 @@ three and none of them substitutes for another:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import time
@@ -42,10 +43,13 @@ from assistant.budget import BudgetExhausted, DailyCallBudget
 from assistant.chunking import chunk_passages
 from assistant.corpus_checksum import verify_corpus
 from assistant.documents import read_corpus
-from assistant.embedding import FastEmbedEmbedder
+from assistant.embedding import MODEL_NAME, Embedder, FastEmbedEmbedder
 from assistant.metrics import AssistantMetrics
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
+from assistant.vectors import load as load_vectors
+from assistant.web_security import NONCE_PLACEHOLDER as NONCE_PLACEHOLDER
+from assistant.web_security import apply_security_headers, content_security_policy
 
 logger = logging.getLogger(__name__)
 
@@ -149,13 +153,37 @@ def require_caller_secret(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Not authorised.")
 
 
+async def warm_embedder(embedder: Embedder) -> None:
+    """Load the model off the startup path, once the service is already serving.
+
+    With precomputed vectors nothing loads the model until a question arrives,
+    which would move a cold start onto a visitor rather than removing it. This
+    pays that cost in the background: the platform sees a healthy machine within
+    seconds, and the model is ready well before anyone has finished typing.
+
+    `to_thread` because the load is blocking CPU work and this runs on the event
+    loop; without it a "background" warm-up would block every request it was
+    supposed to protect.
+
+    Failure is logged and swallowed on purpose. A warm-up is an optimisation —
+    the first question loads the model itself if this did not — and taking the
+    process down over a slow optimisation would trade a slow answer for none.
+    """
+    try:
+        await asyncio.to_thread(embedder.embed_query, "warm-up")
+    except Exception:
+        logger.exception("embedder warm-up failed; the first question will load it")
+    else:
+        logger.info("embedder warm")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Index the corpus before serving.
 
-    Done at startup rather than per request because embedding the corpus takes
-    seconds, and because a corpus that fails to load should stop the process
-    rather than surface as an error on someone's first question.
+    Done at startup rather than per request because a corpus that fails to load
+    should stop the process rather than surface as an error on someone's first
+    question.
     """
     settings = Settings()
     corpus = settings.corpus_dir
@@ -178,7 +206,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(f"No documents found in {corpus}/. Nothing to serve.")
 
     chunks = chunk_passages(passages)
-    retriever = InMemoryRetriever(chunks, FastEmbedEmbedder())
+    embedder = FastEmbedEmbedder()
+
+    # Precomputed or computed here, never "precomputed if it works": a
+    # configured vectors file that does not describe this corpus raises out of
+    # `load_vectors` and stops the process. See `vectors.py` for why silence is
+    # the wrong response to that.
+    matrix = None
+    if settings.corpus_vectors_file is not None:
+        matrix = load_vectors(
+            settings.corpus_vectors_file,
+            chunks,
+            model=MODEL_NAME,
+            dimensions=embedder.dimensions,
+        )
+
+    retriever = InMemoryRetriever(chunks, embedder, matrix)
 
     state.settings = settings
     state.chunk_count = len(chunks)
@@ -202,7 +245,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.daily_answer_limit,
         "required" if settings.require_shared_secret else "not required",
     )
-    yield
+
+    # Started only when the corpus was not embedded here. Embedding it already
+    # loaded the model, so a warm-up would be a second call that proves nothing.
+    warmup = (
+        asyncio.create_task(warm_embedder(embedder)) if matrix is not None else None
+    )
+    try:
+        yield
+    finally:
+        if warmup is not None:
+            warmup.cancel()
 
 
 app = FastAPI(
@@ -323,54 +376,9 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     )
 
 
-SECURITY_HEADERS = {
-    # Two years, because a shorter max-age leaves a window where a downgrade
-    # attack still works. Fly terminates TLS and redirects, but a header is what
-    # stops the *first* request going out over HTTP next time.
-    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
-    # Without this a response the browser thinks might be script is treated as
-    # script. Cheap, and there is no case where sniffing helps us.
-    "X-Content-Type-Options": "nosniff",
-    # Legacy twin of frame-ancestors, for anything that predates CSP.
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
-    # Nothing here uses any of these, so none should be reachable.
-    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()",
-}
-
-NONCE_PLACEHOLDER = "__CSP_NONCE__"
-"""Substituted per response. A marker in the markup, never a real value."""
-
-
 def _csp(nonce: str | None) -> str:
-    """The policy, tightened as far as this page allows.
-
-    `default-src 'none'` rather than `'self'`: the deny-by-default version means
-    a directive that is missing fails closed. Every source below is one this
-    page provably needs.
-
-    The inline <style> and <script> carry a per-request nonce instead of
-    'unsafe-inline'. They are the page's own code, but 'unsafe-inline' would
-    also authorise anything injected into the markup later, which is the exact
-    attack CSP exists to stop.
-    """
-    script = f"'nonce-{nonce}'" if nonce else "'none'"
-    style = f"'nonce-{nonce}'" if nonce else "'none'"
-    return "; ".join(
-        [
-            "default-src 'none'",
-            f"script-src {script}",
-            f"style-src {style}",
-            # The page posts to /ask on its own origin and nowhere else.
-            "connect-src 'self'",
-            "img-src 'self' data:",
-            "base-uri 'none'",
-            "form-action 'none'",
-            "frame-ancestors 'none'",
-            "object-src 'none'",
-            "upgrade-insecure-requests",
-        ]
-    )
+    """Compatibility name retained for the existing API and its tests."""
+    return content_security_policy(nonce)
 
 
 @app.middleware("http")
@@ -382,11 +390,7 @@ async def security_headers(request: Request, call_next: Any) -> Any:
     rather than by us.
     """
     response = await call_next(request)
-    for header, value in SECURITY_HEADERS.items():
-        response.headers.setdefault(header, value)
-    # The HTML route sets its own policy carrying that response's nonce; a
-    # nonce reused across responses is no better than no nonce at all.
-    response.headers.setdefault("Content-Security-Policy", _csp(None))
+    apply_security_headers(response)
     return response
 
 

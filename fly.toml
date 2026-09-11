@@ -26,6 +26,13 @@ primary_region = "lhr"          # London: nearest to the author and to UK reader
 
 [env]
   PORT = "8080"
+
+  # The demo corpus, embedded at image-build time rather than at every start.
+  # Small here — two documents — but the same code path the portfolio
+  # deployment depends on, and a path only one deployment exercises is a path
+  # that breaks in the one that matters.
+  CORPUS_VECTORS_FILE = "/opt/vectors/content.npz"
+
   # ANTHROPIC_API_KEY is NOT set here. This file is committed, so anything in it
   # is public. The key is set with `fly secrets set`, which stores it encrypted
   # and injects it at runtime without it ever entering the repository or an

@@ -70,6 +70,22 @@ class Settings(BaseSettings):
     supported; the explicit value wins.
     """
 
+    corpus_vectors_file: Path | None = None
+    """Vectors for `corpus_dir`, built ahead of time, or `None` to embed at startup.
+
+    Embedding the corpus is the overwhelming majority of a cold start — 7.4s of
+    8.4s on the development machine, three to four minutes on a throttled
+    deployment CPU. Building the matrix at image-build time and pointing at it
+    here removes that work from the startup path.
+
+    **Set, but wrong, is a failure and not a fallback.** A file that is missing,
+    unreadable, built by a different model, or built from different text stops
+    the service starting. Quietly embedding the corpus instead would turn a
+    stale artifact into a slow start nobody investigates, when the thing it is
+    warning about — rows that no longer correspond to chunks — misattributes
+    every citation it touches.
+    """
+
     system_prompt_file: Path | None = None
     """A file containing the system prompt, or `None` for the built-in default.
 

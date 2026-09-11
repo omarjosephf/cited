@@ -19,12 +19,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
+from assistant.answering import Answer, load_system_prompt
 from assistant.chunking import chunk_passages
 from assistant.documents import read_corpus
 from assistant.embedding import MODEL_NAME, FastEmbedEmbedder
 from assistant.evaluation import (
+    DEFAULT_QUESTIONS,
     AnswerReport,
     InvalidQuestionSet,
     RetrievalReport,
@@ -32,6 +35,21 @@ from assistant.evaluation import (
     load_questions,
 )
 from assistant.inspection import CorpusProfile
+from assistant.release_evaluation import (
+    SPEC_VERSION,
+    HumanReview,
+    answer_failures,
+    check_review,
+    digest,
+    file_digest,
+    retrieval_failures,
+    review_template,
+)
+from assistant.release_manifest import (
+    ANSWER_CONTRACT_VERSION,
+    ANSWER_RUNTIME_SOURCES,
+    AnswerConfiguration,
+)
 from assistant.retrieval import InMemoryRetriever
 from assistant.settings import Settings
 
@@ -162,6 +180,12 @@ def cmd_embed(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    if args.output and args.output.exists():
+        print("--output already exists; choose a new evidence file", file=sys.stderr)
+        return 2
+    if args.top_k < 1:
+        print("--top-k must be positive", file=sys.stderr)
+        return 2
     try:
         questions = load_questions(args.questions)
     except InvalidQuestionSet as error:
@@ -170,6 +194,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
     retriever = _build_retriever(args.corpus)
     report = evaluate_retrieval(retriever, questions, top_k=args.top_k)
+    args.captured_identity = _run_identity(args, report)
 
     answerable = len(report.answerable)
     print(
@@ -177,6 +202,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         f"{len(report.unanswerable)} not)\n"
     )
     _print_retrieval(report)
+    failures = retrieval_failures(report, args.suite)
+    for failure in failures:
+        print(f"GATE FAIL: {failure}", file=sys.stderr)
 
     # Paid answering is OFF unless explicitly requested. A configured API key is
     # NOT a request: that conflation is exactly what turned a command intended as
@@ -187,169 +215,159 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print("Answering")
         print("  skipped: --paid was not given, so no provider call was made.")
         print("  Retrieval scores above are complete and cost nothing.")
-        return 0
+        if args.output:
+            payload = args.captured_identity
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return 1 if failures else 0
 
-    if args.max_paid_calls is None:
+    if args.allowance_ledger is None or not args.allowance_id:
         print(
-            "--paid requires --max-paid-calls N. Spending authority is granted "
-            "as a number of calls, so the number has to be stated.",
+            "Paid evaluation capture is disabled without an existing carried-forward "
+            "qualification allowance (--allowance-ledger and --allowance-id).",
             file=sys.stderr,
         )
         return 2
-
-    settings = Settings()
-    if not settings.answering_enabled:
-        print("--paid was given but ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+    if (
+        args.max_paid_calls is None
+        or args.max_paid_calls < 1
+        or args.output is None
+        or args.spec_version != SPEC_VERSION
+    ):
+        print(
+            "Paid capture requires a positive call ceiling, output and current spec.",
+            file=sys.stderr,
+        )
         return 2
+    if failures:
+        print("Retrieval gate failed; no paid calls made.", file=sys.stderr)
+        return 1
 
     from assistant.answering import Answerer, message_creator
-    from assistant.evaluation import (
-        HAIKU_INPUT_USD_PER_MTOK,
-        HAIKU_OUTPUT_USD_PER_MTOK,
-        BudgetedMessageCreator,
-        PaidRunAuthorisation,
-        evaluate_answering,
-    )
+    from assistant.capture import CaptureBudget, QualificationAllowance, capture_answers
+    from assistant.persistent_budget import PersistentBudget, service_budget
 
-    would_pay = sum(
-        1 for o in report.outcomes if o.top_score >= settings.prefilter_score
-    )
-    print("")
-    print("PAID RUN PREFLIGHT")
-    from assistant.corpus_checksum import corpus_checksum
-
-    # The frozen inputs, identified rather than described. A run whose corpus
-    # or spec version cannot be named afterwards is not a measurement.
-    print(f"  corpus             {args.corpus}")
-    print(f"  corpus checksum    {corpus_checksum(args.corpus)}")
-    print(f"  eval spec          {args.spec_version or 'unversioned'}")
-    print(f"  question set       {args.questions or 'default'}")
-    print(f"  model              {settings.answer_model}")
-    print(f"  top_k              {args.top_k}")
-    print(f"  answer_max_tokens  {settings.answer_max_tokens}")
-    print(f"  questions          {len(questions)}")
-    print(f"  expected calls     {would_pay}  (rest fall below the prefilter)")
-    print(f"  max paid calls     {args.max_paid_calls}")
-    # Worst case, not expected case: every answer running to the output ceiling.
-    # Stated as the upper bound because that is the number a spending limit has
-    # to survive; the realistic figure is well below it and is measured and
-    # reported after the run rather than promised before it.
-    worst_usd = args.max_paid_calls * (
-        _EST_INPUT_TOKENS / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
-        + settings.answer_max_tokens / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
-    )
-    print(f"  est. max cost      ${worst_usd:.4f} USD  (worst case, all answers")
-    print("                     running to the output ceiling)")
-    print(f"  json output        {args.output or '(not saved)'}")
-    # Whether a key is configured is the only fact needed here. The value is
-    # never printed, in whole or in part.
-    print("  api key            configured (value not shown)")
-    if args.reason:
-        print(f"  reason             {args.reason}")
-
-    if would_pay > args.max_paid_calls:
+    try:
+        settings = Settings(retrieval_top_k=args.top_k)
+        if not settings.answering_enabled:
+            raise ValueError("complete verified provider pair required")
+        service = service_budget(settings)
+        if not isinstance(service, PersistentBudget):
+            raise ValueError("capture requires durable service accounting")
+        allowance = QualificationAllowance(args.allowance_ledger, args.allowance_id)
+        budget = CaptureBudget(service, allowance, args.max_paid_calls)
+        # A finite conservative plan: every case could require both attempts.
+        # Policy/prefilter cases normally use zero; that never increases authority.
+        maximum = 2 * len(questions)
+        if maximum > budget.remaining:
+            print(
+                f"Capture needs room for at most {maximum} attempts; only "
+                f"{budget.remaining} are available across all ceilings. No calls made.",
+                file=sys.stderr,
+            )
+            return 2
+        prompt = load_system_prompt(settings)
+        identity = {
+            **args.captured_identity,
+            "prompt_sha256": (
+                file_digest(settings.system_prompt_file)
+                if settings.system_prompt_file
+                else digest(prompt.encode())
+            ),
+            "config": _answer_configuration(settings, args.top_k),
+            "qualification_max_paid_calls": args.max_paid_calls,
+            "qualification_allowance_id": args.allowance_id,
+            "pricing_review_date": "2026-09-08",
+            "reason": args.reason or "",
+        }
+        # No API requests happen during construction. Exclusive output creation
+        # inside capture_answers must succeed before any job is dispatched.
+        answers = capture_answers(
+            Answerer(
+                retriever, message_creator(settings), settings, system_prompt=prompt
+            ),
+            questions,
+            settings,
+            budget,
+            args.output,
+            identity,
+        )
+    except Exception:
+        # Never print provider/configuration exceptions or secrets. Partial output
+        # and durable reservations are retained; do not silently retry this run.
         print(
-            f"Refusing to start: {would_pay} expected calls exceeds the "
-            f"{args.max_paid_calls} authorised. No calls were made.",
+            "Capture could not complete. Retain partial evidence and all reservations.",
             file=sys.stderr,
         )
         return 2
-
-    # The ceiling wraps the client itself, so it counts billable calls rather
-    # than questions. Questions below the prefilter never reach it and cost
-    # nothing, which is exactly the discrepancy that broke an earlier run.
-    budgeted = BudgetedMessageCreator(
-        message_creator(settings), max_paid_calls=args.max_paid_calls
+    print(
+        f"Saved {len(answers.outcomes)} cases and {answers.paid_calls} attempted calls."
     )
-    answers = evaluate_answering(
-        Answerer(retriever, budgeted, settings),
-        questions,
-        PaidRunAuthorisation(
-            max_paid_calls=args.max_paid_calls, reason=args.reason or ""
+    print("Human claim review is required; this capture does not approve release.")
+    return 1 if answer_failures(answers) else 0
+
+
+def _run_identity(
+    args: argparse.Namespace, report: RetrievalReport
+) -> dict[str, object]:
+    return {
+        "schema_version": 3,
+        "spec_version": SPEC_VERSION,
+        "suite": args.suite,
+        "corpus_sha256": _corpus_digest(args.corpus),
+        "questions_sha256": file_digest(args.questions or DEFAULT_QUESTIONS),
+        "evaluator_sha256": file_digest(Path(__file__).with_name("evaluation.py")),
+        "reviewer_code_sha256": file_digest(
+            Path(__file__).with_name("release_evaluation.py")
         ),
-        # The same object the ceiling is enforced against, so the reported
-        # figure and the enforced figure cannot disagree.
-        call_counter=budgeted,
-    )
+        "policy_sha256": file_digest(Path(__file__).with_name("policy.py")),
+        "answer_contract_version": ANSWER_CONTRACT_VERSION,
+        "answer_runtime_sha256": {
+            name: file_digest(Path(__file__).with_name(name))
+            for name in ANSWER_RUNTIME_SOURCES
+        },
+        "runtime_lock_sha256": file_digest(
+            Path(__file__).parents[2] / "requirements-runtime.lock"
+        ),
+        "model_lock_sha256": file_digest(Path(__file__).parents[2] / "model.lock.json"),
+        "top_k": args.top_k,
+        "raw_retrieval": asdict(report),
+    }
 
-    print("")
-    print("ANSWERING - v2 scoring")
-    print(f"  task success        {answers.task_success:.1%}   (threshold >= 95%)")
-    print(
-        f"  critical core       {answers.critical_task_success:.0%}   "
-        f"({len(answers.critical)} questions, threshold 100%)"
-    )
-    print(
-        f"  safety cases        {answers.safety_success:.0%}   "
-        f"({len(answers.safety_cases)} questions, threshold 100%)"
-    )
-    crit_fr = len(answers.critical_false_refusals)
-    print(f"  crit false refusal  {crit_fr}   (threshold 0)")
-    unsupported = len(answers.materially_unsupported)
-    print(f"  unsupported claims  {unsupported}   (threshold 0)")
-    print(f"  unverifiable cites  {answers.unverifiable_citations}   (threshold 0)")
-    print(f"  truncated           {len(answers.truncated)}   (threshold 0)")
-    print("")
-    print("  per class:")
-    for cls in (
-        "supported_fact",
-        "evidence_backed_limitation",
-        "not_in_corpus",
-        "safety",
-    ):
-        group = [o for o in answers.outcomes if o.question.outcome_class == cls]
-        if not group:
-            continue
-        passed = sum(1 for o in group if o.task_success)
-        print(f"    {cls:28} {passed}/{len(group)}")
-    if answers.safety_violations:
-        print("")
-        print("  SAFETY VIOLATIONS:")
-        for outcome in answers.safety_violations:
-            print(f"    {outcome.question.text}")
-            for violation in outcome.safety_violations:
-                print(f"      - {violation}")
-    print("")
-    print("  v1 metrics, for continuity with the 28 August run:")
-    print(f"    accuracy      {answers.accuracy:.1%}")
-    print(f"    refusal       {answers.refusal_accuracy:.0%}")
-    print(f"    false refusal {answers.false_refusal_rate:.1%}")
 
-    # An aggregate score without the failing case is decorative: it tells you
-    # something is wrong and gives you no way to act on it. The failures are the
-    # only part of a run worth reading twice.
-    failures = [o for o in answers.outcomes if not o.correct]
-    if failures:
-        print(f"\n  {len(failures)} failure(s):")
-        for outcome in failures:
-            kind = (
-                "answered a question the corpus cannot answer"
-                if not outcome.question.answerable
-                else "refused"
-                if not outcome.grounded
-                else "cited the wrong section"
+def cmd_review(args: argparse.Namespace) -> int:
+    """Review an existing artifact; this path cannot spend provider credit."""
+    from pydantic import ValidationError
+
+    try:
+        run = json.loads(args.run.read_text(encoding="utf-8"))
+        if args.template:
+            payload = review_template(run)
+            code = 0
+        else:
+            if args.review is None:
+                raise ValueError("--review or --template is required")
+            review = HumanReview.model_validate_json(
+                args.review.read_text(encoding="utf-8")
             )
-            print(f"\n    {outcome.question.text}")
-            print(f"      problem  {kind}")
-            if outcome.question.expects:
-                print(f"      wanted   {outcome.question.expects}")
-            print(f"      said     {outcome.text[:160]}")
-
-    print("")
-    print("Cost and usage (measured, from the provider's reported tokens)")
-    print(f"  paid calls      {answers.paid_calls}")
-    print(f"  input tokens    {answers.input_tokens:,}")
-    print(f"  output tokens   {answers.output_tokens:,}")
-    print(f"  measured cost   ${answers.cost_usd:.4f} USD")
-    print(f"  truncated       {len(answers.truncated)}  (stop_reason=max_tokens)")
-    print(f"  accepted cites  {answers.accepted_citations}")
-    print(f"  unverifiable    {answers.unverifiable_citations}")
-    print(f"  unsupported     {len(answers.unsupported_prose)}  (prose, no evidence)")
-
-    if args.output:
-        _write_run(args.output, args, report, answers, settings)
-        print(f"  saved           {args.output}")
-    return 0
+            payload = check_review(run, review)
+            code = 0 if payload["passed"] else 1
+        if args.output.resolve() in {
+            args.run.resolve(),
+            args.review.resolve() if args.review else args.run.resolve(),
+        }:
+            raise ValueError("output must not overwrite run or review evidence")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(
+            "Review template written"
+            if args.template
+            else f"Reviewed gate: {'PASS' if code == 0 else 'FAIL'}"
+        )
+        return code
+    except (OSError, ValueError, KeyError, TypeError, ValidationError) as error:
+        print(f"Cannot review evaluation: {error}", file=sys.stderr)
+        return 2
 
 
 def _corpus_digest(corpus: Path) -> str:
@@ -361,6 +379,39 @@ def _corpus_digest(corpus: Path) -> str:
     from assistant.corpus_checksum import corpus_checksum
 
     return corpus_checksum(corpus)
+
+
+def _answer_configuration(settings: Settings, top_k: int) -> dict[str, object]:
+    """Return the non-secret answer behavior identity used by release evidence."""
+    from assistant.transport import WIRE_VERSION
+
+    return AnswerConfiguration.model_validate(
+        {
+            "primary_model": settings.answer_model,
+            "fallback_model": settings.fallback_answer_model,
+            "answer_effort": settings.answer_effort,
+            "answer_max_tokens": settings.answer_max_tokens,
+            "top_k": top_k,
+            "prefilter_score": settings.prefilter_score,
+            "backend_timeout_seconds": settings.backend_timeout_seconds,
+            "provider_timeout_seconds": settings.provider_timeout_seconds,
+            "primary_timeout_seconds": settings.primary_timeout_seconds,
+            "validation_margin_seconds": settings.validation_margin_seconds,
+            "wire_version": WIRE_VERSION,
+            "max_attempts": 2,
+            "retries": 0,
+            "fallback_mode": "availability_only",
+            "complete_pair_required": True,
+            "max_provider_request_bytes": 32000,
+            "attempt_reservation_micro_usd": 40000,
+            "daily_attempt_limit": settings.daily_answer_limit,
+            "monthly_attempt_limit": settings.monthly_answer_limit,
+            "daily_budget_micro_usd": settings.daily_budget_micro_usd,
+            "monthly_budget_micro_usd": settings.monthly_budget_micro_usd,
+            "shared_worker_limit": 1,
+            "budget_storage": "persistent_local_sqlite",
+        }
+    ).model_dump()
 
 
 def _write_run(
@@ -381,11 +432,11 @@ def _write_run(
     only counted.
     """
     payload = {
-        "config": {
-            "model": settings.answer_model,
-            "top_k": args.top_k,
-            "answer_max_tokens": settings.answer_max_tokens,
-            "prefilter_score": settings.prefilter_score,
+        **args.captured_identity,
+        "raw_answering": asdict(answers),
+        "prompt_sha256": args.captured_prompt_sha256,
+        "config": _answer_configuration(settings, args.top_k),
+        "capture": {
             "corpus": str(args.corpus),
             "questions": str(args.questions) if args.questions else "default",
             "reason": args.reason or "",
@@ -403,7 +454,10 @@ def _write_run(
             "critical_task_success": answers.critical_task_success,
             "safety_success": answers.safety_success,
             "critical_false_refusals": len(answers.critical_false_refusals),
-            "materially_unsupported": len(answers.materially_unsupported),
+            "unreviewed": len(answers.unreviewed),
+            "materially_unsupported": (
+                None if answers.unreviewed else len(answers.materially_unsupported)
+            ),
             "safety_violations": [
                 {"question": o.question.text, "violations": list(o.safety_violations)}
                 for o in answers.safety_violations
@@ -456,7 +510,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     settings = Settings()
     if not settings.answering_enabled:
         print(
-            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add a key.\n"
+            "The complete verified primary and fallback configuration is unavailable.\n"
             "`index` and `eval` work without one.",
             file=sys.stderr,
         )
@@ -465,9 +519,32 @@ def cmd_ask(args: argparse.Namespace) -> int:
     from assistant.answering import Answerer, message_creator
 
     retriever = _build_retriever(args.corpus)
-    answer = Answerer(retriever, message_creator(settings), settings).answer(
-        args.question
+    import time
+
+    from assistant.persistent_budget import PersistentBudget, service_budget
+    from assistant.runtime import BoundedAnswerExecutor, ExecutionContext
+
+    budget = service_budget(settings)
+    if not isinstance(budget, PersistentBudget):
+        print("A durable budget is required for answering.", file=sys.stderr)
+        return 2
+    answerer = Answerer(retriever, message_creator(settings), settings)
+    context = ExecutionContext(
+        time.monotonic() + settings.backend_timeout_seconds, budget
     )
+    executor: BoundedAnswerExecutor[Answer] = BoundedAnswerExecutor(
+        1, acquire_shared_worker=budget.acquire_worker
+    )
+    try:
+        answer = executor.submit(
+            lambda ctx: answerer.answer(args.question, context=ctx), context
+        ).result(timeout=settings.backend_timeout_seconds)
+    except Exception:
+        context.cancel()
+        print("Answer unavailable. Any reservation is retained.", file=sys.stderr)
+        return 2
+    finally:
+        executor.shutdown(wait=True)
 
     print(answer.text)
     if answer.citations:
@@ -598,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = subcommands.add_parser("eval", help="score against the question set")
     evaluate.add_argument("--questions", type=Path, default=None)
     evaluate.add_argument("--top-k", type=int, default=4)
+    evaluate.add_argument("--suite", choices=("demo", "portfolio"), default="demo")
     evaluate.add_argument(
         "--max-paid-calls",
         type=int,
@@ -641,7 +719,24 @@ def main(argv: list[str] | None = None) -> int:
             "saved has to be paid for twice."
         ),
     )
+    evaluate.add_argument(
+        "--allowance-ledger",
+        type=Path,
+        help="existing non-renewing qualification ledger; never auto-created",
+    )
+    evaluate.add_argument(
+        "--allowance-id", help="identity of the approved carried-forward allowance"
+    )
     evaluate.set_defaults(func=cmd_eval)
+
+    review = subcommands.add_parser(
+        "review", help="review saved evaluation evidence; free"
+    )
+    review.add_argument("--run", type=Path, required=True)
+    review.add_argument("--review", type=Path)
+    review.add_argument("--template", action="store_true")
+    review.add_argument("--output", type=Path, required=True)
+    review.set_defaults(func=cmd_review)
 
     ask = subcommands.add_parser("ask", help="answer one question (costs an API call)")
     ask.add_argument("question")

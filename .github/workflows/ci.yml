@@ -24,22 +24,34 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      EMBEDDING_CACHE_DIR: .fastembed_cache
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
         with:
           # Matches `requires-python = ">=3.12"`. Pinned rather than "latest"
           # so a new Python release cannot turn a passing build red overnight
           # for reasons unrelated to any change made here.
-          python-version: "3.12"
+          python-version: "3.12.13"
           cache: pip
+          cache-dependency-path: "requirements-*.lock"
 
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[api,dev]"
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock -r requirements-build.lock
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip check
+
+      - name: Dependency vulnerability gate
+        run: python -m pip_audit --no-deps --disable-pip -r requirements-dev.lock -r requirements-build.lock
+
+      - name: Prepare verified embedding model
+        run: python scripts/prepare_model.py --cache-dir .fastembed_cache
 
       - name: Lint
         run: ruff check .
@@ -50,6 +62,32 @@ jobs:
       - name: Types
         run: mypy src tests
 
+      - name: Retrieval evaluation
+        # The half of the evaluation that costs nothing. Retrieval is the layer
+        # that fails first and silently, so it is worth checking on every commit
+        # rather than only when someone remembers to run it locally.
+        run: HF_HUB_OFFLINE=1 doc-assistant eval --suite demo --output eval/results/demo-retrieval.json
+
+      - name: Read pinned portfolio revision
+        id: portfolio
+        run: echo "sha=$(python -c 'import json; print(json.load(open("eval/portfolio-source.json"))["commit"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout approved portfolio corpus
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          repository: omarjosephf/ojflorendo-portfolio
+          ref: ${{ steps.portfolio.outputs.sha }}
+          path: .ci/portfolio
+          persist-credentials: false
+
+      - name: Set up Node.js for the corpus exporter
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Stage verified portfolio corpus for tests and container
+        run: node .ci/portfolio/scripts/export-assistant-corpus.mjs deploy/oj-assistant
+
       - name: Tests
         # No ANTHROPIC_API_KEY is set, deliberately. Every test must pass
         # without one: the suite uses a test double for the Anthropic client,
@@ -57,11 +95,11 @@ jobs:
         # a suite that only runs on one laptop is not a suite.
         run: pytest -q
 
-      - name: Retrieval evaluation
-        # The half of the evaluation that costs nothing. Retrieval is the layer
-        # that fails first and silently, so it is worth checking on every commit
-        # rather than only when someone remembers to run it locally.
-        run: doc-assistant eval
+      - name: Portfolio retrieval gate
+        run: HF_HUB_OFFLINE=1 doc-assistant --corpus deploy/oj-assistant/content eval --suite portfolio --questions .ci/portfolio/content/assistant-eval/questions.toml --output eval/results/portfolio-retrieval.json
+
+      - name: Build default container without provider credentials
+        run: docker build --build-arg BACKEND_COMMIT="$GITHUB_SHA" --tag cited:ci .
 
   # Deliberately a separate job. A secret reaching a tracked file is not a test
   # failure like any other — it is the one failure that cannot be undone by
@@ -78,16 +116,18 @@ jobs:
           # a different and much slower check; this catches the mistake at the
           # point it is still cheap to fix.
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.13"
           cache: pip
+          cache-dependency-path: "requirements-*.lock"
 
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock -r requirements-build.lock
+          python -m pip install --no-deps --no-build-isolation -e .
 
       - name: No credentials in tracked files
         run: pytest tests/test_no_secrets_committed.py -q

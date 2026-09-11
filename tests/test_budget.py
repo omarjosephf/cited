@@ -37,29 +37,15 @@ def test_exceeding_the_limit_raises_rather_than_spending() -> None:
     assert budget.used == 2
 
 
-def test_a_refund_returns_the_reservation() -> None:
-    """A failed provider call must not consume budget.
-
-    Without this, an outage burns the day's allowance without answering
-    anything — the worst of both outcomes.
-    """
+def test_reservations_have_no_unowned_refund_path() -> None:
+    """Uncertain provider attempts must never replenish the allowance."""
     budget = DailyCallBudget(limit=1)
     budget.spend()
-    budget.refund()
 
-    budget.spend()  # must not raise
+    assert not hasattr(budget, "refund")
     assert budget.used == 1
-
-
-def test_refunding_more_than_was_spent_cannot_create_credit() -> None:
-    budget = DailyCallBudget(limit=5)
-    budget.spend()
-    budget.refund()
-    budget.refund()
-    budget.refund()
-
-    assert budget.used == 0, "refunds must not push the counter below zero"
-    assert budget.remaining == 5
+    with pytest.raises(BudgetExhausted):
+        budget.spend()
 
 
 def test_the_counter_resets_on_a_new_utc_day(monkeypatch: pytest.MonkeyPatch) -> None:

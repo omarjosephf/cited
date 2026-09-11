@@ -147,16 +147,150 @@
       const sourcesEl = document.getElementById("sources");
       const flagEl = document.getElementById("flag");
       const counterEl = document.getElementById("counter");
+      const exampleButtons = [...document.querySelectorAll(".examples button")];
+
+      const REQUEST_TIMEOUT_MS = 10_000;
+      const MAX_RESPONSE_BYTES = 48 * 1024;
+      const NOT_COVERED_MESSAGE =
+        "I don't have that information in these documents.";
+      const UNAVAILABLE_MESSAGE =
+        "The answering service is unavailable. Please try again.";
+      const POLICY_IDS = new Set([
+        "unsupported",
+        "identity",
+        "architecture",
+        "bulk_extraction",
+        "unpublished_work",
+        "provider_self_identification",
+        "bulk_reproduction",
+        "privacy",
+      ]);
+      const EVIDENCE_ID = /^[a-f0-9]{64}$/;
+      let requestActive = false;
 
       // Everything from the server is inserted with textContent, never innerHTML.
       // The answer text is model output derived from documents; treating it as
       // markup would be an injection route straight through the corpus.
       const show = (el, text) => { el.textContent = text; };
 
+      function hasExactKeys(value, keys) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return false;
+        }
+        const actual = Object.keys(value).sort();
+        const expected = [...keys].sort();
+        return actual.length === expected.length &&
+          actual.every((key, index) => key === expected[index]);
+      }
+
+      function boundedString(value, maximum) {
+        return typeof value === "string" && value.length > 0 &&
+          value.length <= maximum;
+      }
+
+      function validateResponse(data) {
+        if (!data || data.version !== 2 || typeof data.state !== "string") {
+          return null;
+        }
+        if (data.state === "answered") {
+          if (!hasExactKeys(data, ["version", "state", "answer", "citations"]) ||
+              !boundedString(data.answer, 4000) ||
+              !Array.isArray(data.citations) || data.citations.length < 1 ||
+              data.citations.length > 8) {
+            return null;
+          }
+          for (const citation of data.citations) {
+            if (!hasExactKeys(citation, ["source_id", "evidence_id", "quote"]) ||
+                !boundedString(citation.source_id, 200) ||
+                !boundedString(citation.quote, 1000) ||
+                typeof citation.evidence_id !== "string" ||
+                !EVIDENCE_ID.test(citation.evidence_id)) {
+              return null;
+            }
+          }
+          return data;
+        }
+        if (data.state === "not-covered") {
+          return hasExactKeys(data, ["version", "state", "policy"]) &&
+            POLICY_IDS.has(data.policy) ? data : null;
+        }
+        if (data.state === "unavailable") {
+          return hasExactKeys(data, ["version", "state"]) ? data : null;
+        }
+        return null;
+      }
+
+      const cancelQuietly = (body) => {
+        try { void body?.cancel().catch(() => undefined); } catch { /* Best effort. */ }
+      };
+
+      async function readCappedJson(response, signal) {
+        const declared = Number(response.headers.get("Content-Length"));
+        if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+          cancelQuietly(response.body);
+          throw new Error("response_too_large");
+        }
+        if (!response.body) throw new Error("response_body_missing");
+        const reader = response.body.getReader();
+        const chunks = [];
+        let size = 0;
+        const abort = () => cancelQuietly(reader);
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+          while (true) {
+            if (signal.aborted) throw new Error("aborted");
+            const { done, value } = await reader.read();
+            if (signal.aborted) throw new Error("aborted");
+            if (done) break;
+            if (!value.byteLength) continue;
+            size += value.byteLength;
+            if (size > MAX_RESPONSE_BYTES) {
+              cancelQuietly(reader);
+              throw new Error("response_too_large");
+            }
+            chunks.push(value);
+          }
+          const bytes = new Uint8Array(size);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+        } finally {
+          signal.removeEventListener("abort", abort);
+          try { reader.releaseLock(); } catch { /* A read may be unwinding. */ }
+        }
+      }
+
+      async function fetchJson(url, options = {}) {
+        const controller = new AbortController();
+        let timeout;
+        const expiry = new Promise((_, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new Error("request_deadline"));
+          }, REQUEST_TIMEOUT_MS);
+        });
+        const request = async () => {
+          const response = await fetch(url, { ...options, signal: controller.signal });
+          if (!response.ok) {
+            cancelQuietly(response.body);
+            return { response, data: null };
+          }
+          return { response, data: await readCappedJson(response, controller.signal) };
+        };
+        try {
+          return await Promise.race([request(), expiry]);
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
       async function refreshCounter() {
         try {
-          const res = await fetch("/health");
-          const data = await res.json();
+          const { response, data } = await fetchJson("/health");
+          if (!response.ok || !data) throw new Error("health_unavailable");
           counterEl.textContent =
             `${data.answers_remaining_today} answers remaining today · ${data.chunks} passages indexed`;
         } catch {
@@ -165,68 +299,69 @@
       }
 
       function render(data) {
-        show(answerEl, data.answer);
-
-        if (!data.grounded) {
+        if (data.state === "not-covered") {
           flagEl.hidden = false;
-          show(
-            flagEl,
-            data.refused
-              ? "The documents do not cover this. Nothing below is an answer from them."
-              : "This response cites no passage, so it is not grounded in the documents."
-          );
+          show(flagEl, NOT_COVERED_MESSAGE);
+          return;
+        }
+        if (data.state === "unavailable") {
+          flagEl.hidden = false;
+          show(flagEl, UNAVAILABLE_MESSAGE);
+          return;
         }
 
-        if (data.citations.length) {
-          const heading = document.createElement("h2");
-          heading.textContent = data.refused ? "Passages consulted" : "Sources";
-          sourcesEl.append(heading);
+        show(answerEl, data.answer);
+        const heading = document.createElement("h2");
+        heading.textContent = "Sources";
+        sourcesEl.append(heading);
 
-          for (const citation of data.citations) {
-            const wrap = document.createElement("div");
-            wrap.className = "citation";
-            const quote = document.createElement("blockquote");
-            quote.textContent = `“${citation.quote}”`;
-            const cite = document.createElement("cite");
-            cite.textContent = citation.source;
-            wrap.append(quote, cite);
-            sourcesEl.append(wrap);
-          }
+        for (const citation of data.citations) {
+          const wrap = document.createElement("div");
+          wrap.className = "citation";
+          const quote = document.createElement("blockquote");
+          quote.textContent = `“${citation.quote}”`;
+          const cite = document.createElement("cite");
+          cite.textContent = citation.source_id;
+          wrap.append(quote, cite);
+          sourcesEl.append(wrap);
         }
       }
 
+      function setRequestActive(active) {
+        requestActive = active;
+        submit.disabled = active;
+        for (const button of exampleButtons) button.disabled = active;
+        submit.textContent = active ? "Thinking…" : "Ask";
+      }
+
       async function ask(question) {
+        if (requestActive || typeof question !== "string" || !question.trim()) return;
+        setRequestActive(true);
         answerEl.textContent = "";
         sourcesEl.textContent = "";
         flagEl.hidden = true;
-        submit.disabled = true;
-        submit.textContent = "Thinking…";
 
         try {
-          const res = await fetch("/ask", {
+          const { response, data } = await fetchJson("/ask", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({ question: question.trim() }),
           });
-
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({}));
+          if (!response.ok) {
             flagEl.hidden = false;
-            show(
-              flagEl,
-              res.status === 429
-                ? "Too many questions in a short time. Please wait a moment."
-                : body.detail || `Request failed (${res.status}).`
-            );
+            show(flagEl, response.status === 429
+              ? "Too many questions in a short time. Please wait a moment."
+              : UNAVAILABLE_MESSAGE);
             return;
           }
-          render(await res.json());
+          const validated = validateResponse(data);
+          if (!validated) throw new Error("invalid_response");
+          render(validated);
         } catch {
           flagEl.hidden = false;
-          show(flagEl, "Could not reach the service.");
+          show(flagEl, UNAVAILABLE_MESSAGE);
         } finally {
-          submit.disabled = false;
-          submit.textContent = "Ask";
+          setRequestActive(false);
           refreshCounter();
         }
       }
@@ -237,7 +372,7 @@
         if (question) ask(question);
       });
 
-      for (const button of document.querySelectorAll(".examples button")) {
+      for (const button of exampleButtons) {
         button.addEventListener("click", () => {
           input.value = button.dataset.q;
           ask(button.dataset.q);

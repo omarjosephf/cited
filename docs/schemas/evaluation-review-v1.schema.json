@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "CaseReview": {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "answer_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Answer Sha256",
+          "type": "string"
+        },
+        "task_success": {
+          "title": "Task Success",
+          "type": "boolean"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/SegmentReview"
+          },
+          "minItems": 1,
+          "title": "Segments",
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "answer_sha256",
+        "task_success",
+        "segments"
+      ],
+      "title": "CaseReview",
+      "type": "object"
+    },
+    "EvidenceReference": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_index": {
+          "minimum": 0,
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "quote": {
+          "minLength": 1,
+          "title": "Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chunk_index",
+        "quote"
+      ],
+      "title": "EvidenceReference",
+      "type": "object"
+    },
+    "SegmentReview": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "nonfactual"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "policy_basis": {
+          "default": false,
+          "title": "Policy Basis",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "verdict",
+        "rationale"
+      ],
+      "title": "SegmentReview",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "run_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Run Sha256",
+      "type": "string"
+    },
+    "reviewer": {
+      "minLength": 1,
+      "title": "Reviewer",
+      "type": "string"
+    },
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/CaseReview"
+      },
+      "minItems": 1,
+      "title": "Cases",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_sha256",
+    "reviewer",
+    "cases"
+  ],
+  "title": "HumanReview",
+  "type": "object"
+}

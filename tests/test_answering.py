@@ -1,6 +1,6 @@
 """Tests for answering and refusal.
 
-No network and no API key. The Anthropic client is replaced by a double that
+No network and no API key. The provider client is replaced by a double that
 records what it was sent and returns a scripted response, so these tests assert
 on the two things that actually matter: what we ask the model, and how we
 interpret what comes back.
@@ -46,6 +46,7 @@ class FakeBlock:
 @dataclass
 class FakeResponse:
     content: list[Any]
+    stop_reason: str = "end_turn"
 
 
 class FakeMessages:
@@ -85,7 +86,6 @@ def result(index: int, score: float, section: str) -> SearchResult:
 
 def settings(**overrides: Any) -> Settings:
     base: dict[str, Any] = {
-        "anthropic_api_key": SecretStr("test-key"),
         "prefilter_score": 0.45,
     }
     return Settings(**{**base, **overrides})
@@ -130,9 +130,8 @@ class TestGrounding:
         answer = service.answer("What are the components?")
 
         assert not answer.grounded
-        # The text is preserved so a caller can show what was said, but the flag
-        # is what decides whether it is presented as an answer.
-        assert answer.text == "I think it is four."
+        assert answer.text == NOT_IN_CORPUS
+        assert answer.suppression_reason == "missing_citation"
 
     def test_refusal_text_is_returned_ungrounded(self) -> None:
         service, _ = answerer(
@@ -165,8 +164,9 @@ class TestGrounding:
         )
         answer = service.answer("q")
 
-        assert len(answer.citations) == 1
-        assert answer.citations[0].chunk_index == 0
+        assert answer.citations == ()
+        assert answer.text == NOT_IN_CORPUS
+        assert answer.suppression_reason == "invalid_citation"
 
     def test_sources_are_deduplicated_in_first_use_order(self) -> None:
         service, _ = answerer(
@@ -286,8 +286,9 @@ class TestCitationVerification:
         )
         answer = service.answer("q")
 
-        assert len(answer.citations) == 1
-        assert answer.rejected_citations == 2
+        assert answer.citations == ()
+        assert answer.rejected_citations == 1  # Stop at the first invalid citation.
+        assert answer.text == NOT_IN_CORPUS
 
 
 class TestPrefilter:
@@ -372,37 +373,22 @@ class TestRequestShape:
         assert call["model"] == settings().answer_model
         assert call["max_tokens"] == settings().answer_max_tokens
 
-    def test_effort_is_omitted_by_default(self) -> None:
-        """`effort` is rejected by the Haiku tier, which is the default model.
-
-        Sending it unconditionally would 400 every single request — a total
-        outage caused by an optional parameter.
-        """
-        assert settings().answer_effort is None
+    def test_effort_is_fixed_to_the_approved_primary_configuration(self) -> None:
+        assert settings().answer_effort == "none"
 
         service, messages = answerer(FakeResponse([FakeBlock("A.", [FakeCitation(0)])]))
         service.answer("q")
 
-        assert "output_config" not in messages.calls[0]
+        assert messages.calls[0]["output_config"] == {"effort": "none"}
 
-    def test_effort_is_sent_when_explicitly_configured(self) -> None:
-        messages = FakeMessages(FakeResponse([FakeBlock("A.", [FakeCitation(0)])]))
-        service = Answerer(
-            StubRetriever(RESULTS), messages, settings(answer_effort="low")
-        )
-        service.answer("q")
-
-        assert messages.calls[0]["output_config"] == {"effort": "low"}
-
-    def test_the_default_model_is_the_cheap_one(self) -> None:
-        """A default that costs 5x more is a default nobody notices until the bill."""
-        assert settings().answer_model == "claude-haiku-4-5"
+    def test_the_default_model_is_the_owner_approved_primary(self) -> None:
+        assert settings().answer_model == "gemini-3.5-flash-lite"
 
 
 class TestClientConstruction:
     def test_a_missing_key_fails_with_an_actionable_message(self) -> None:
-        with pytest.raises(RuntimeError, match=r"\.env\.example"):
-            build_client(Settings(anthropic_api_key=SecretStr("")))
+        with pytest.raises(RuntimeError, match="verified Gemini/Luna account"):
+            build_client(Settings(_env_file=None))  # type: ignore[call-arg]
 
     def test_a_configured_key_builds_a_client(self) -> None:
         """Constructing the client makes no network call, so this is safe to run.
@@ -410,14 +396,28 @@ class TestClientConstruction:
         It verifies the key actually reaches the client rather than being read
         into settings and then quietly dropped.
         """
-        client = build_client(Settings(anthropic_api_key=SecretStr("sk-ant-test")))
-        assert client.api_key == "sk-ant-test"
+        client = build_client(
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                openai_api_key=SecretStr("sk-openai-test"),
+                openai_project_id="project-test",
+                openai_account_verified=True,
+                gemini_api_key=SecretStr("gemini-test"),
+                gemini_project_id="project-test",
+                gemini_account_verified=True,
+                enable_fallback=True,
+            )
+        )
+        assert client.calls == 0
 
     def test_the_api_key_is_not_exposed_by_repr(self) -> None:
         """A key printed into a log or traceback is a leaked key."""
-        configured = Settings(anthropic_api_key=SecretStr("sk-ant-secret-value"))
-        assert "sk-ant-secret-value" not in repr(configured)
-        assert "sk-ant-secret-value" not in str(configured.anthropic_api_key)
+        configured = Settings(
+            openai_api_key=SecretStr("sk-secret-value"),
+            openai_project_id="project-test",
+        )
+        assert "sk-secret-value" not in repr(configured)
+        assert "sk-secret-value" not in str(configured.openai_api_key)
 
 
 class TestConfigurableSystemPrompt:
@@ -473,9 +473,7 @@ class TestConfigurableSystemPrompt:
 
         service, messages = answerer(
             FakeResponse([FakeBlock("A.", [FakeCitation(0)])]),
-            settings_override=Settings(
-                anthropic_api_key=SecretStr("test-key"), system_prompt_file=prompt
-            ),
+            settings_override=Settings(system_prompt_file=prompt),
         )
         service.answer("q")
 
@@ -495,9 +493,7 @@ class TestConfigurableSystemPrompt:
 
         service, messages = answerer(
             FakeResponse([FakeBlock("A.", [FakeCitation(0)])]),
-            settings_override=Settings(
-                anthropic_api_key=SecretStr("test-key"), system_prompt_file=prompt
-            ),
+            settings_override=Settings(system_prompt_file=prompt),
         )
         service.answer("first")
         prompt.write_text("Swapped underneath us.", encoding="utf-8")
@@ -541,7 +537,7 @@ class TestConversationTurns:
         retriever = StubRetriever(RESULTS)
         service = Answerer(
             retriever,
-            FakeMessages(FakeResponse([FakeBlock("Four parts.")])),
+            FakeMessages(FakeResponse([FakeBlock("Four parts.", [FakeCitation(0)])])),
             settings(),
         )
 
@@ -653,7 +649,9 @@ class TestConversationTurns:
         Re-screening them would let one refused question poison the rest of the
         conversation, refusing legitimate questions that follow it.
         """
-        messages = FakeMessages(FakeResponse([FakeBlock("Four parts.")]))
+        messages = FakeMessages(
+            FakeResponse([FakeBlock("Four parts.", [FakeCitation(0)])])
+        )
         service = Answerer(StubRetriever(RESULTS), messages, settings())
 
         answer = service.answer(

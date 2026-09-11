@@ -9,44 +9,66 @@ Three protections, because a public endpoint that makes paid calls needs all
 three and none of them substitutes for another:
 
 * **Rate limiting** bounds how fast money leaves.
-* **The daily budget** bounds how much leaves in total.
+* **The durable budget** reserves combined API money and attempts before dispatch.
 * **A question length cap** bounds the size of any single call.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from assistant.answer_event import answer_event_header
 from assistant.answering import (
     MAX_HISTORY_SOURCES,
     MAX_HISTORY_TURNS,
     Answerer,
     Turn,
+    build_client,
     load_system_prompt,
-    message_creator,
 )
-from assistant.budget import BudgetExhausted, DailyCallBudget
+from assistant.budget import AttemptBudget, BudgetExhausted
 from assistant.chunking import chunk_passages
 from assistant.corpus_checksum import verify_corpus
 from assistant.documents import read_corpus
 from assistant.embedding import MODEL_NAME, Embedder, FastEmbedEmbedder
-from assistant.metrics import AssistantMetrics
+from assistant.metrics import AssistantMetrics, MetricsIdentity
+from assistant.persistent_budget import (
+    BudgetCapacityError,
+    BudgetUnavailable,
+    PersistentBudget,
+    service_budget,
+)
+from assistant.request_boundary import AskBoundaryMiddleware
 from assistant.retrieval import InMemoryRetriever
+from assistant.runtime import (
+    BoundedAnswerExecutor,
+    ExecutionContext,
+    ExecutorCapacityError,
+    ExecutorClosedError,
+)
 from assistant.settings import Settings
+from assistant.transport import (
+    AnsweredResponse,
+    AskResponse,
+    UnsupportedResponse,
+    safe_response,
+)
 from assistant.vectors import load as load_vectors
 from assistant.web_security import NONCE_PLACEHOLDER as NONCE_PLACEHOLDER
 from assistant.web_security import apply_security_headers, content_security_policy
@@ -73,7 +95,9 @@ class HistoryTurnIn(BaseModel):
     """
 
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
-    sources: list[str] = Field(default_factory=list, max_length=MAX_HISTORY_SOURCES)
+    sources: list[
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=80)]
+    ] = Field(default_factory=list, max_length=MAX_HISTORY_SOURCES)
 
 
 class AskRequest(BaseModel):
@@ -86,30 +110,20 @@ class AskRequest(BaseModel):
     sends it against an older service has the field ignored (ADR-0007 E4)."""
 
 
-class CitationOut(BaseModel):
-    quote: str
-    source: str
-
-
-class AskResponse(BaseModel):
-    answer: str
-    citations: list[CitationOut]
-    grounded: bool
-    """False means this is not an answer from the documents — a refusal, or
-    something unsupported. Exposed so a client cannot present ungrounded prose
-    as though it were sourced."""
-    refused: bool
-
-
 class State:
     """Built once at startup, shared by every request."""
 
     settings: Settings
     answerer: Answerer
-    budget: DailyCallBudget
+    budget: AttemptBudget
     metrics: AssistantMetrics
     chunk_count: int
     corpus_checksum: str
+    prompt_checksum: str = ""
+    executor: BoundedAnswerExecutor[
+        tuple[AnsweredResponse | UnsupportedResponse, int, str | None]
+    ]
+    warmup: asyncio.Task[None] | None = None
 
 
 state = State()
@@ -148,7 +162,7 @@ def require_caller_secret(request: Request) -> None:
         raise HTTPException(status_code=503, detail="Service is not configured.")
 
     presented = request.headers.get(SECRET_HEADER, "")
-    if not secrets.compare_digest(presented, expected):
+    if not secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
         # Deliberately says nothing about which part was wrong.
         raise HTTPException(status_code=401, detail="Not authorised.")
 
@@ -172,7 +186,7 @@ async def warm_embedder(embedder: Embedder) -> None:
     try:
         await asyncio.to_thread(embedder.embed_query, "warm-up")
     except Exception:
-        logger.exception("embedder warm-up failed; the first question will load it")
+        logger.warning("assistant_warmup_failed")
     else:
         logger.info("embedder warm")
 
@@ -226,36 +240,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state.settings = settings
     state.chunk_count = len(chunks)
     state.corpus_checksum = checksum
-    state.budget = DailyCallBudget(limit=settings.daily_answer_limit)
-    state.metrics = AssistantMetrics()
+    state.budget = service_budget(settings)
+    prompt = load_system_prompt(settings)
+    state.prompt_checksum = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    state.metrics = AssistantMetrics(
+        MetricsIdentity(
+            model=f"{settings.answer_model}+{settings.fallback_answer_model}",
+            corpus=checksum,
+            prompt=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        )
+    )
+    state.executor = BoundedAnswerExecutor(
+        settings.answer_workers,
+        acquire_shared_worker=state.budget.acquire_worker
+        if isinstance(state.budget, PersistentBudget)
+        else None,
+    )
+    provider_router = build_client(settings)
     state.answerer = Answerer(
         retriever,
-        message_creator(settings),
+        provider_router,
         settings,
-        load_system_prompt(settings),
+        prompt,
     )
 
-    logger.info(
-        "ready: %d chunks from %s, corpus %s, model %s, daily limit %d, "
-        "shared secret %s",
-        len(chunks),
-        corpus,
-        checksum[:12],
-        settings.answer_model,
-        settings.daily_answer_limit,
-        "required" if settings.require_shared_secret else "not required",
-    )
+    logger.info("assistant_ready")
 
     # Started only when the corpus was not embedded here. Embedding it already
     # loaded the model, so a warm-up would be a second call that proves nothing.
     warmup = (
         asyncio.create_task(warm_embedder(embedder)) if matrix is not None else None
     )
+    state.warmup = warmup
     try:
         yield
     finally:
         if warmup is not None:
-            warmup.cancel()
+            await asyncio.gather(warmup, return_exceptions=True)
+        await asyncio.to_thread(state.executor.shutdown, wait=True)
 
 
 app = FastAPI(
@@ -303,7 +325,7 @@ async def metrics(request: Request) -> dict[str, Any]:
 
 @app.post("/ask", response_model=AskResponse)
 @limiter.limit("10/minute")
-async def ask(request: Request, body: AskRequest) -> AskResponse:
+async def ask(request: Request, body: AskRequest, response: Response) -> AskResponse:
     """Answer one question from the corpus.
 
     `request` is unused by the body of this function but required: slowapi
@@ -311,69 +333,166 @@ async def ask(request: Request, body: AskRequest) -> AskResponse:
     """
     require_caller_secret(request)
 
+    if state.warmup is not None and not state.warmup.done():
+        raise HTTPException(
+            status_code=503, detail="The answering service is warming up."
+        )
+
+    expected = state.settings.shared_secret.get_secret_value()
+    include_event = (
+        bool(expected)
+        and request.headers.get("X-Assistant-Event") == "1"
+        and secrets.compare_digest(
+            request.headers.get(SECRET_HEADER, "").encode("utf-8"),
+            expected.encode("utf-8"),
+        )
+    )
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="Question cannot be empty.")
 
-    # Reserved before the call, not recorded after it. Recording afterwards
-    # would let concurrent requests all pass the check and then all spend.
-    try:
-        state.budget.spend()
-    except BudgetExhausted:
-        state.metrics.record("unavailable", 0.0)
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "This service has reached its daily limit of answered "
-                "questions. It resets at midnight UTC."
-            ),
-        ) from None
-
-    # Mapped out of the request model rather than passed through it, so the
-    # answering layer takes its own type and never a validated-but-foreign
-    # object from the transport layer.
     history = tuple(
         Turn(turn.question.strip(), tuple(turn.sources)) for turn in body.history
     )
-
     started = time.monotonic()
+    deadline = getattr(
+        request.state,
+        "answer_deadline",
+        started + state.settings.backend_timeout_seconds,
+    )
+    context = ExecutionContext(deadline=deadline, budget=state.budget)
+
+    def execute(
+        job: ExecutionContext,
+    ) -> tuple[AnsweredResponse | UnsupportedResponse, int, str | None]:
+        try:
+            answer = state.answerer.answer(question, history, context=job)
+            job.raise_if_stopped()
+            validation_started = time.monotonic()
+            try:
+                result = safe_response(answer)
+                event = (
+                    answer_event_header(
+                        answer,
+                        result,
+                        job.status(),
+                        corpus_sha256=state.corpus_checksum,
+                        prompt_sha256=state.prompt_checksum,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                    )
+                    if include_event
+                    else None
+                )
+                return result, answer.rejected_citations, event
+            finally:
+                job.record_stage(
+                    "validation",
+                    min(60_000.0, (time.monotonic() - validation_started) * 1000),
+                )
+        finally:
+            status = job.status()
+            for stage, duration in status.stages_ms.items():
+                state.metrics.record_stage(stage, duration)
+            for attempt in status.attempts:
+                state.metrics.record_attempt(
+                    attempt.outcome,
+                    route=attempt.route,
+                    model=attempt.model,
+                    input_tokens=attempt.input_tokens,
+                    output_tokens=attempt.output_tokens,
+                )
+
     try:
-        answer = state.answerer.answer(question, history)
+        future = state.executor.submit(execute, context)
+    except (
+        ExecutorCapacityError,
+        ExecutorClosedError,
+        BudgetCapacityError,
+        BudgetUnavailable,
+    ) as exc:
+        state.metrics.record_admission(
+            "rejected_full"
+            if isinstance(exc, (ExecutorCapacityError, BudgetCapacityError))
+            else "rejected_closed"
+        )
+        state.metrics.record(
+            "unavailable", min(60_000.0, (time.monotonic() - started) * 1000)
+        )
+        logger.info("assistant_capacity_unavailable")
+        raise HTTPException(
+            status_code=503, detail="The answering service is unavailable."
+        ) from None
+    state.metrics.record_admission("admitted")
+    state.metrics.record_stage(
+        "queue", min(60_000.0, (time.monotonic() - started) * 1000)
+    )
+    wrapped = asyncio.wrap_future(future)
+    # Observe late exceptions even after the HTTP waiter times out/disconnects.
+    wrapped.add_done_callback(
+        lambda done: None if done.cancelled() else done.exception()
+    )
+
+    async def disconnected() -> None:
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+
+    disconnect_task = asyncio.create_task(disconnected())
+    waiters: set[asyncio.Future[Any]] = {wrapped, disconnect_task}
+    try:
+        ready, _ = await asyncio.wait(
+            waiters,
+            timeout=max(0, deadline - time.monotonic()),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnect_task in ready or wrapped not in ready:
+            context.cancel()
+            logger.info("assistant_deadline_or_disconnect")
+            raise HTTPException(
+                status_code=504, detail="The answering service is unavailable."
+            )
+        result, rejected_citations, event = wrapped.result()
+        context.raise_if_stopped()
+    except asyncio.CancelledError:
+        context.cancel()
+        state.metrics.record(
+            "unavailable", min(60_000.0, (time.monotonic() - started) * 1000)
+        )
+        raise
+    except (BudgetExhausted, BudgetUnavailable):
+        state.metrics.record(
+            "unavailable", min(60_000.0, (time.monotonic() - started) * 1000)
+        )
+        logger.info("assistant_budget_exhausted")
+        raise HTTPException(
+            status_code=503, detail="The answering service is unavailable."
+        ) from None
+    except HTTPException:
+        state.metrics.record(
+            "unavailable", min(60_000.0, (time.monotonic() - started) * 1000)
+        )
+        raise
     except Exception:
-        state.budget.refund()
-        state.metrics.record("unavailable", (time.monotonic() - started) * 1000)
-        # Logged without the question: it is user input, and a log is a place
-        # data goes to be retained and read by people it was not sent to.
-        logger.exception("answering failed")
+        context.cancel()
+        state.metrics.record(
+            "unavailable", min(60_000.0, (time.monotonic() - started) * 1000)
+        )
+        logger.warning("assistant_answer_failed")
         raise HTTPException(
             status_code=502, detail="The answering service is unavailable."
         ) from None
-
-    # Recorded by the outcome a visitor actually saw, so an operator reading
-    # "not_covered" knows what was on screen. Still no question text.
+    finally:
+        disconnect_task.cancel()
+        await asyncio.gather(disconnect_task, return_exceptions=True)
     state.metrics.record(
-        "answered" if answer.grounded else "not_covered",
-        (time.monotonic() - started) * 1000,
-        answer.rejected_citations,
+        "answered" if result.state == "answered" else "not_covered",
+        min(60_000.0, (time.monotonic() - started) * 1000),
+        rejected_citations=rejected_citations,
     )
-
-    if answer.rejected_citations:
-        # Should be impossible: the API computes citations from the documents
-        # supplied. A non-zero count means an assumption has broken, so it is
-        # logged loudly rather than silently discarded.
-        logger.warning(
-            "rejected %d citation(s): quoted text absent from the supplied passage",
-            answer.rejected_citations,
-        )
-
-    return AskResponse(
-        answer=answer.text,
-        citations=[
-            CitationOut(quote=c.quoted_text, source=c.source) for c in answer.citations
-        ],
-        grounded=answer.grounded,
-        refused=answer.refused,
-    )
+    if event is not None:
+        response.headers["X-Assistant-Event"] = event
+    return result
 
 
 def _csp(nonce: str | None) -> str:
@@ -390,7 +509,7 @@ async def security_headers(request: Request, call_next: Any) -> Any:
     rather than by us.
     """
     response = await call_next(request)
-    apply_security_headers(response)
+    apply_security_headers(response, no_store=request.url.path in {"/ask", "/metrics"})
     return response
 
 
@@ -408,8 +527,22 @@ async def index() -> HTMLResponse:
 async def internal_error(request: Request, exc: Exception) -> JSONResponse:
     """Never leak internals to a caller.
 
-    A stack trace tells an attacker about paths, versions and structure. It goes
-    to the log, where the operator can see it; the caller gets a fixed string.
+    Neither the caller nor application logs receive the exception payload.
     """
-    logger.exception("unhandled error")
+    logger.error("assistant_unhandled_error")
     return JSONResponse(status_code=500, content={"detail": "Internal error."})
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    # FastAPI's default error includes input values; do not echo those values.
+    return JSONResponse(status_code=422, content={"detail": "Invalid request."})
+
+
+app.add_middleware(
+    AskBoundaryMiddleware,
+    settings=lambda: state.settings,
+    authenticate=require_caller_secret,
+)

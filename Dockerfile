@@ -2,34 +2,21 @@
 # the second copies only what is needed to run, so build tooling and pip caches
 # never reach the published image.
 
-FROM python:3.12-slim AS build
-
-# Compilers are needed to install some wheels and are not needed to run
-# anything, which is precisely why this happens in a stage that gets discarded.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
+ARG PYTHON_IMAGE=python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM ${PYTHON_IMAGE} AS build
 
 WORKDIR /build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# `src/` is copied before the install because the build backend needs it to
-# build the wheel, which means editing a docstring invalidates this layer and
-# reinstalls every dependency, ONNX Runtime included.
-#
-# That is accepted rather than overlooked. Avoiding it needs either a stub
-# package installed first and then overwritten, or a separate stage pinning
-# fastembed on its own — and that second pin would silently control the layout
-# of the model cache the runtime stage reads. Trading a build-cache miss for a
-# version coupling that fails at runtime, on a project that rebuilds rarely, is
-# a bad trade. Revisit if builds become frequent enough to be felt.
-# LICENSE is here because pyproject.toml declares `license = { file = "LICENSE" }`,
-# and hatchling reads it while generating metadata. Omitting it does not degrade
-# the image, it stops the build outright with "License file does not exist" —
-# which happens on the deploy platform, after a push, rather than locally.
+# Hashed wheels only; a missing wheel fails without installing a compiler.
+# Install dependencies before source so source edits preserve this cache layer.
+# The build backend is pinned separately and never resolves extra dependencies.
+COPY requirements-runtime.lock requirements-build.lock ./
+RUN python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock \
+    && python -m pip install --require-hashes --only-binary=:all: --prefix=/install -r requirements-runtime.lock
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
-RUN pip install --prefix=/install ".[api]"
+RUN python -m pip install --no-deps --no-build-isolation --prefix=/install .
 
 # Bake the embedding model into the image (~64 MB, measured).
 #
@@ -43,8 +30,11 @@ RUN pip install --prefix=/install ".[api]"
 # and `EMBEDDING_CACHE_DIR` below is this project's own variable, honoured by
 # `FastEmbedEmbedder`. Setting a plausible-looking `FASTEMBED_CACHE_PATH` does
 # nothing at all — verified, after writing exactly that mistake.
+COPY model.lock.json ./
+COPY scripts/prepare_model.py ./scripts/prepare_model.py
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/opt/models')"
+    python scripts/prepare_model.py --cache-dir /opt/models
+ENV HF_HUB_OFFLINE=1
 
 # Embed every corpus in the image, here, on a build machine that is not
 # throttled. Measured on the portfolio corpus: 7.4s of an 8.4s cold start goes
@@ -77,10 +67,14 @@ RUN PYTHONPATH=/install/lib/python3.12/site-packages \
       done'
 
 
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
+ARG BACKEND_COMMIT
+RUN python -c "import os,re; assert re.fullmatch('[0-9a-f]{40}', os.environ.get('BACKEND_COMMIT', '')), 'BACKEND_COMMIT must be a full source SHA'"
+LABEL org.opencontainers.image.source="https://github.com/omarjosephf/cited" \
+      org.opencontainers.image.revision="${BACKEND_COMMIT}"
 
-# Runs as a non-root user. The process only ever reads its own files and makes
-# outbound HTTPS calls, so root buys nothing and costs the usual: any code
+# Runs as a non-root user. The process reads application/model files, writes only its
+# mounted content-free budget ledger, and makes outbound HTTPS calls. Root buys nothing and costs the usual: any code
 # execution bug becomes a root code execution bug.
 RUN useradd --create-home --uid 1000 app
 
@@ -105,11 +99,13 @@ COPY --chown=app:app deploy/ ./deploy/
 # running it as a network service to offer the source to its users. Shipping the
 # terms alongside the code is the least that requires.
 COPY --chown=app:app pyproject.toml README.md LICENSE ./
+COPY --chown=app:app requirements-runtime.lock model.lock.json ./
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     EMBEDDING_CACHE_DIR=/opt/models \
+    HF_HUB_OFFLINE=1 \
     PORT=8080
 
 USER app
@@ -120,6 +116,6 @@ EXPOSE 8080
 # to start correctly.
 #
 # A single worker is deliberate. Each one loads its own copy of the model, and
-# the daily budget lives in process memory — a second worker would quietly
-# double the ceiling it is supposed to enforce.
+# one persistent admission lock also caps actual answering across processes.
+# Replication requires a separately reviewed shared-storage design.
 CMD ["sh", "-c", "uvicorn assistant.api:app --host 0.0.0.0 --port ${PORT} --workers 1"]

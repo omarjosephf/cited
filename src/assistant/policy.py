@@ -35,9 +35,16 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
+POLICY_VERSION = "portfolio-policy-v3"
+
+UNSUPPORTED_RESPONSE = (
+    "I don't have that information in OJ's published material. "
+    "You can contact OJ directly."
+)
+
 APPROVED_IDENTITY = (
-    "I am OJ Assistant, a Smart AI Assistant built by OJ Florendo to answer "
-    "questions from his approved public portfolio content. I'm not OJ himself."
+    "I am E.V, an AI assistant built by OJ Florendo to answer questions from "
+    "his approved public portfolio content. I'm not OJ himself."
 )
 """The approved answer to "what are you" — the *product* question.
 
@@ -47,16 +54,16 @@ new opportunity to get it wrong every time it is asked.
 """
 
 APPROVED_ARCHITECTURE = (
-    "I'm OJ Assistant, built by OJ Florendo. I currently use Claude Haiku 4.5 "
-    "as the language model within OJ's RAG architecture, alongside his "
-    "retrieval, citation-verification, evaluation, privacy, and policy controls."
+    "I am E.V, built by OJ Florendo. I use Gemini 3.5 Flash-Lite from Google as my "
+    "primary language model, with GPT-5.6 Luna from OpenAI as a "
+    "backup when the primary service is unavailable. Both use OJ's approved "
+    "documents and the same citation and policy checks."
 )
 """The approved answer to "what model are you" — the *implementation* question.
 
-**The distinction this encodes is the whole point.** OJ Assistant is the product
-OJ built; Claude Haiku 4.5 is one component inside it. The assistant may never
-present itself *as* Claude, and may truthfully say that Claude powers part of
-the system. Those are different sentences and only the first is prohibited.
+E.V is the product OJ built; the named primary and backup models are components
+inside it. The assistant may never present itself as either provider's model,
+while it may truthfully describe the approved architecture.
 
 Model and provider information is approved **public architecture information,
 not a secret** — decided deliberately by the owner on 29 August 2026. Concealing
@@ -84,6 +91,21 @@ UNPUBLISHED_WORK_RESPONSE = (
     "or contact OJ directly about a potential opportunity."
 )
 
+PRIVACY_RESPONSE = (
+    "Questions are sent through OJ's server to OpenAI, and may also be sent to "
+    "Google if the primary service is unavailable. Completed "
+    "exchanges are kept in bounded sessionStorage for this browser tab so they "
+    "can return after E.V is closed and reopened or the page is refreshed; "
+    "browser session restore can revive the record, and a duplicated or "
+    "opener-created tab may initially copy it before the tabs diverge "
+    "independently. Pending requests are not saved or resent. Clear chat removes "
+    "E.V's record when browser storage is available. Closing a tab does not "
+    "guarantee physical erasure. OJ, the portfolio server, and the assistant "
+    "service do not keep a transcript, and there is no account, database, "
+    "cross-device history, or promise here about the provider's retention or "
+    "training."
+)
+
 
 class Policy:
     """Names for the policies, so a decision can be reported and tested by name."""
@@ -94,6 +116,20 @@ class Policy:
     UNPUBLISHED_WORK = "unpublished_work"
     PROVIDER_SELF_ID = "provider_self_identification"
     BULK_REPRODUCTION = "bulk_reproduction"
+    PRIVACY = "privacy"
+
+
+POLICY_RESPONSES: dict[str, str] = {
+    "unsupported": UNSUPPORTED_RESPONSE,
+    Policy.IDENTITY: APPROVED_IDENTITY,
+    Policy.ARCHITECTURE: APPROVED_ARCHITECTURE,
+    Policy.BULK_EXTRACTION: BULK_EXTRACTION_RESPONSE,
+    Policy.UNPUBLISHED_WORK: UNPUBLISHED_WORK_RESPONSE,
+    Policy.PROVIDER_SELF_ID: APPROVED_IDENTITY,
+    Policy.BULK_REPRODUCTION: BULK_EXTRACTION_RESPONSE,
+    Policy.PRIVACY: PRIVACY_RESPONSE,
+}
+"""Application-owned text allowed to cross the public policy-result boundary."""
 
 
 @dataclass(frozen=True)
@@ -113,16 +149,16 @@ _ARCHITECTURE_REQUEST = (
     # powers it rather than about what it is.
     re.compile(r"\bare\s+you\s+(?:claude|chatgpt|gpt|gemini|llama)\b", re.I),
     re.compile(r"\bwhat\s+(?:model|llm)\s+are\s+you\b", re.I),
-    # "What model powers OJ Assistant / this assistant / you"
+    # "What model powers E.V / this assistant / you"
     re.compile(
-        r"\bwhat\s+(?:ai\s+)?(?:model|llm)\b[^.?!]{0,30}?"
+        r"\b(?:what|which)\s+(?:ai\s+)?(?:model|llm)\b[^.?!]{0,40}?"
         r"\b(?:powers?|runs?|drives?|behind|uses?)\b",
         re.I,
     ),
     re.compile(r"\bwhat\s+(?:are\s+you\s+)?(?:powered|running)\s+(?:by|on)\b", re.I),
-    # "Does OJ Assistant / this assistant / do you use Anthropic?"
+    # "Does E.V / this assistant / do you use Anthropic?"
     re.compile(
-        r"\bdo(?:es)?\s+(?:oj\s+assistant|this\s+assistant|the\s+assistant|you)\b"
+        r"\bdo(?:es)?\s+(?:e\.v|this\s+assistant|the\s+assistant|you)\b"
         r"[^.?!]{0,30}?\buse\b[^.?!]{0,30}?"
         r"\b(?:anthropic|claude|openai|gpt|a\s+model|an?\s+llm)\b",
         re.I,
@@ -144,6 +180,7 @@ _IDENTITY_REQUEST = (
     re.compile(r"\b(?:what|who)\s+(?:exactly\s+)?are\s+you\b", re.I),
     re.compile(r"\bare\s+you\s+(?:an?\s+)?(?:ai|bot|chatbot|robot|human|real)\b", re.I),
     re.compile(r"\bare\s+you\s+oj(?:\s+florendo)?\b", re.I),
+    re.compile(r"\bare\s+you\s+e\.v\b", re.I),
     re.compile(r"\bwho\s+(?:made|built|created|trained)\s+you\b", re.I),
 )
 
@@ -496,7 +533,7 @@ def _is_depth_from_coverage(
 def is_depth_reproduction(answer: str, passages: tuple[str, ...]) -> bool:
     """Whether the answer reproduces several retrieved passages near-completely.
 
-    Enforces: *OJ Assistant may quote what a grounded answer needs, but must not
+    Enforces: *E.V may quote what a grounded answer needs, but must not
     reproduce source material as a substitute for answering.*
 
     Independent of document attribution by design, so it still catches an
@@ -589,6 +626,8 @@ def screen_answer(
     passages: tuple[str, ...],
     sources: tuple[str, ...] | None = None,
     prior_sources: tuple[str, ...] = (),
+    *,
+    quotes: tuple[str, ...] = (),
 ) -> PolicyResponse | None:
     """Inspect a generated answer, returning a replacement when policy requires.
 
@@ -599,10 +638,13 @@ def screen_answer(
     `prior_sources` are the documents earlier turns of this conversation drew on,
     as reported by the caller. Optional, so a single-turn caller is unaffected.
     """
-    if is_bulk_reproduction(answer, passages, sources):
+    # Citation text is visitor-visible output too. Provider identity remains a
+    # prose-only check: a source quoting a model is not E.V claiming to be it.
+    visible_output = "\n".join((answer, *quotes))
+    if is_bulk_reproduction(visible_output, passages, sources):
         return PolicyResponse(Policy.BULK_REPRODUCTION, BULK_EXTRACTION_RESPONSE)
 
-    if is_conversation_extraction(answer, passages, sources, prior_sources):
+    if is_conversation_extraction(visible_output, passages, sources, prior_sources):
         return PolicyResponse(Policy.BULK_REPRODUCTION, BULK_EXTRACTION_RESPONSE)
 
     if has_provider_self_identification(answer):

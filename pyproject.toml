@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -20,7 +20,7 @@ requires-python = ">=3.12"
 # resolve. The lockfile is the reproducibility mechanism, not these ranges.
 dependencies = [
     "fastembed>=0.8,<0.9",     # ONNX embeddings — deliberately NOT torch (ADR-0001)
-    "pypdf>=6.0,<7",
+    "pypdf>=6.16.1,<7",      # security fixes; exact version is in the hashed locks
     "python-docx>=1.1,<2",
     "anthropic>=0.75",
     "pydantic>=2.9,<3",
@@ -32,7 +32,7 @@ dependencies = [
 # pulling a web server — the same boundary that keeps a future client
 # deployment a wrapper rather than a rewrite.
 api = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.32,<1", "slowapi>=0.1.9,<1"]
-dev = ["pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8", "mypy>=1.13", "pyyaml>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8", "mypy>=1.13", "pyyaml>=6.0", "pip-audit>=2.9,<3"]
 
 # This line was once declared before `assistant/cli.py` existed, so
 # `pip install -e .` produced a `doc-assistant` command that died with
@@ -50,6 +50,10 @@ packages = ["src/assistant"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Tests import from scripts/ (test_model_lock imports scripts.prepare_model).
+# Bare `pytest` does not put the project root on sys.path the way
+# `python -m pytest` does, so CI failed to collect while local runs passed.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 88

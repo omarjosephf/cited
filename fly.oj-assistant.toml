@@ -1,196 +1,76 @@
-# Fly.io configuration for the OJ Assistant deployment.
+# E.V release candidate on the existing Fly app; not an activation receipt.
+# After owner approval and the durable-budget cutover checks:
+#   fly deploy --config fly.oj-assistant.toml --remote-only --ha=false
+# Always name this config: fly.toml targets the separate Cited demo.
 #
-# A second instance of the same image over a different corpus. Same code, same
-# container, different documents and a different system prompt — which is the
-# claim this project makes about itself, tested by actually doing it rather than
-# by asserting it in a README.
-#
-# DEPLOY WITH:
-#     fly deploy --config fly.oj-assistant.toml --remote-only --ha=false
-#
-# `--ha=false` is not optional, for the same reason it is not optional in
-# fly.toml: a second machine runs a second process with a second in-memory budget
-# counter, so a limit of N answers a day silently permits 2N.
-#
-# `--config` is not optional either. Without it Fly reads fly.toml and redeploys
-# the *demo* app — with this corpus, if it happens to be staged. Two apps sharing
-# a repository is convenient and has exactly this sharp edge.
-#
-# BEFORE THE FIRST DEPLOY, in order:
-#   1. Export the corpus artifact from the portfolio repository
-#      (`npm run assistant:export`). Nothing below works without it.
-#   2. Set the provider spend cap in the Anthropic console. Under scale-to-zero
-#      (see min_machines_running) it is the ONLY hard financial ceiling — the
-#      in-process counter resets on every start. This is an owner action.
-#   3. `fly secrets set ANTHROPIC_API_KEY=... SHARED_SECRET=...`
-#
-# Steps 2 and 3 are owner actions and are deliberately not automated anywhere.
+# Requires an approved, preinitialized persistent volume, conservative current
+# accounting, BUDGET_LEDGER_ID and the exact BUDGET_MACHINE_ID set privately.
+# Startup refuses missing storage/identity; it never creates a new allowance.
+# See docs/runbooks/durable-budget.md. Do not deploy this incomplete configuration
+# to discover the missing prerequisites or use release_command to initialize it.
 
 app = "oj-assistant"
-primary_region = "lhr"          # London, matching the demo and the audience
+primary_region = "lhr"
 
 [build]
 
+[deploy]
+  # One machine with one ledger. A rolling update entails planned downtime;
+  # canary/bluegreen cannot use its volume. Recheck the pinned ID after updates.
+  strategy = "rolling"
+  max_unavailable = 1
+
 [env]
   PORT = "8080"
-
-  # The exported artifact, staged into the image at build time. `content/` is
-  # still in the image and still contains the demo's prompt-engineering corpus;
-  # pointing at it here would serve visitors documents about prompt engineering
-  # in response to questions about OJ, and every answer would be sincerely wrong.
   CORPUS_DIR = "/app/deploy/oj-assistant/content"
-
-  # Refuse to start unless the corpus hashes to the digest the artifact carries.
-  # The failure this catches is the likely one: a stale or partially copied
-  # corpus, which is otherwise indistinguishable from a correct one until someone
-  # reads an answer carefully.
-  #
-  # What it does not catch, stated so nobody over-trusts it: a wholesale
-  # substitution of corpus AND checksum together, since the digest travels with
-  # the thing it describes. For an independent check, set CORPUS_CHECKSUM to the
-  # value in the release notes — it takes precedence — and compare /health.
   CORPUS_CHECKSUM_FILE = "/app/deploy/oj-assistant/CHECKSUM"
-
-  # The corpus embedded at image-build time, so a start does not repeat it.
-  # Embedding these 64 chunks was 7.4s of an 8.4s cold start on a development
-  # machine and three to four minutes on this one; reading the matrix instead
-  # takes 0.2s. The model is still loaded, for questions rather than for
-  # passages, on a background task once the service is already answering health
-  # checks.
-  #
-  # This file is built from the corpus in the image, so the pair cannot drift by
-  # omission — and if they drift any other way, the service refuses to start
-  # rather than serving answers whose citations point at the wrong passages. A
-  # digest mismatch here means rebuild the image, never "unset this and carry
-  # on".
   CORPUS_VECTORS_FILE = "/opt/vectors/oj-assistant.npz"
-
-  # This deployment's own voice and scope. Without it the service answers as a
-  # generic document assistant, which is accurate and completely characterless.
   SYSTEM_PROMPT_FILE = "/app/deploy/oj-assistant/system-prompt.md"
-
-  # Only the portfolio's server-side route handler may spend this budget. The
-  # secret itself is set with `fly secrets set`, never here: this file is
-  # committed, so anything in it is public.
   REQUIRE_SHARED_SECRET = "true"
-
-  # An operational allowance, NOT a monetary ceiling — and under
-  # min_machines_running = 0 the distinction is not academic, because the counter
-  # resets on every start and the machine stops whenever it is idle. It bounds a
-  # burst within one process lifetime. The provider cap bounds the bill.
-  DAILY_ANSWER_LIMIT = "40"
-
-  # Baseline values, unchanged from the library defaults and stated explicitly so
-  # a reader does not have to know what the defaults are. Lowering either is a
-  # measured decision against the portfolio evaluation set, not a cost reflex:
-  # top_k 3 must not reduce the retrieval hit rate, and max_tokens 512 must not
-  # truncate a realistic answer or drop a citation.
   RETRIEVAL_TOP_K = "4"
   ANSWER_MAX_TOKENS = "1024"
+  ANSWER_WORKERS = "1"
+  BUDGET_PATH = "/data/budget.sqlite3"
+  DAILY_ANSWER_LIMIT = "40"
+  MONTHLY_ANSWER_LIMIT = "200"
+  DAILY_BUDGET_MICRO_USD = "400000"
+  MONTHLY_BUDGET_MICRO_USD = "2000000"
+  # Reserve $0.04 per attempt: money limits admit at most 10/day and 50/month.
+  # Complete provider credentials, account assertions and fallback activation
+  # are private operator configuration after qualification, never values here.
+
+[[mounts]]
+  source = "ev_budget"
+  destination = "/data"
+  initial_size = "1gb"
+  snapshot_retention = 5
+  scheduled_snapshots = true
+  # No automatic extension, independent replica or allowance-reset bootstrap.
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-
-  # Scale to zero. A deliberate trade, and the trade has two sides.
-  #
-  # Gained: compute cost falls from roughly $3.32/month to near nothing, which is
-  # what makes the whole-project operating target realistic rather than nominal.
-  # Inference is a small fraction of the bill at this traffic; compute was the
-  # larger half.
-  #
-  # Given up: the first request after an idle period waits for a machine to boot
-  # plus 1.8s of measured startup, and the in-memory daily budget starts again at
-  # zero on every one of those starts. The second point is the one that matters —
-  # it is why the provider-side spend cap is load-bearing here rather than merely
-  # advisable, and why DAILY_ANSWER_LIMIT above is described as an allowance.
-  #
-  # Cold-start latency must be measured against the real deployment before public
-  # launch. If it makes the assistant feel broken, this is the setting to revisit
-  # first — the fix is a running machine, and it costs about three dollars.
-  # 1, not 0, from 30 Aug 2026. Scale-to-zero looked free and was not: a stopped
-  # machine took a MEASURED 154 seconds to answer /health, because loading the
-  # ONNX embedding model and indexing 64 chunks on a throttled shared-cpu-1x
-  # slice takes 3-4 minutes (see the app logs: "Started server process" to
-  # "Application startup complete"). The portfolio route gives up after 20s
-  # (REQUEST_TIMEOUT_MS in src/lib/assistant/service.ts), so the first visitor
-  # of the day did not get a slow answer - they got "unavailable".
-  #
-  # Keeping one machine warm costs roughly the price of a coffee a month and is
-  # a stopgap, not a fix. The real fix is not needing a neural model to search
-  # 64 chunks; that work is tracked separately. Revisit this line when startup
-  # is measured in seconds, not minutes.
-  #
-  # Side benefit: DAILY_ANSWER_LIMIT is an in-process counter, so scale-to-zero
-  # silently reset the budget on every cold start. A machine that stays up makes
-  # that limit mean what it says.
+  # Preserve the current latency choice. Persistent accounting survives restarts;
+  # keeping warm is a latency decision, not a substitute for durable caps.
   min_machines_running = 1
 
   [http_service.concurrency]
     type = "requests"
-    # The bottleneck is the paid API call, not the web layer. Queueing is
-    # preferable to running several expensive calls at once.
     soft_limit = 20
     hard_limit = 40
 
 [[http_service.checks]]
-  # /health is unauthenticated by design: a platform health check cannot present
-  # a secret, and locking it would make a healthy machine look dead to the thing
-  # responsible for restarting it. It exposes no visitor content — status, chunk
-  # count, corpus digest prefix, remaining allowance.
-  #
-  # Under scale-to-zero these checks only run while a machine is up, so they do
-  # not keep it awake.
   path = "/health"
   interval = "30s"
   timeout = "5s"
-  grace_period = "60s"          # room for the model to load on a cold start
+  grace_period = "60s"
   method = "GET"
 
 [[vm]]
   size = "shared-cpu-1x"
-  # 2 GB, measured on this app on 29 Aug 2026 — not inherited, and not guessed.
-  #
-  # This started at 512 MB, copied from fly.toml along with its "263 MB
-  # measured" figure and the claim that the portfolio corpus is smaller than the
-  # demo's. Both were wrong here. The demo indexes 2 markdown files; this
-  # indexes 10 documents including a PDF. Two deploys OOMed before the server
-  # ever finished starting, ten restarts each:
-  #
-  #   at 512 MB   Killed process 637 (uvicorn)  anon-rss:406468kB
-  #   at 1 GB     Killed process 639 (uvicorn)  anon-rss:875272kB
-  #
-  # Note it grew to roughly 85% of whatever it was given, so neither number is
-  # the requirement — both are just where that box ran out. The requirement came
-  # from a machine that actually started: at 2 GB, /proc/meminfo reports
-  # MemTotal 2015 MB against MemAvailable 934 MB once idle and serving, i.e.
-  # ~1.08 GB in use with the model loaded and 64 chunks indexed. 1 GB could not
-  # have worked; even the steady state exceeds it.
-  #
-  # So 2 GB is ~46% headroom over measured idle, chosen because the failure mode
-  # of being too tight is the container killed mid-request, which reaches a
-  # visitor as an unexplained failure rather than as anything naming its cause.
-  # The machine scales to zero, so the larger tier is billed only while awake.
-  #
-  # Worth tightening later, but only against a measured startup peak (VmHWM of
-  # the uvicorn process) rather than the idle figure above — startup is the
-  # spike that killed the first two deploys, and it is not what /proc/meminfo
-  # shows once the thing is sitting still.
-  # Trimmed 2 GB -> 1.5 GB on 30 Aug 2026, once there was a real number to trim
-  # against. VmHWM of the uvicorn process on a machine that had started, loaded
-  # the model, indexed the corpus and served questions:
-  #
-  #   /proc/639/status:VmHWM:  997260 kB   (974 MB)
-  #
-  # VmHWM is the high-water mark since process start, so it already includes the
-  # startup spike that killed the 512 MB and 1 GB deploys. That also explains
-  # why 1 GB could never have worked: the process alone wants ~975 MB, leaving
-  # nothing for the kernel.
-  #
-  # 1.5 GB is ~50% headroom over measured peak, and $8.40/month against $11.11
-  # for 2 GB. Do not trim further on this evidence: the next step down is 1 GB,
-  # which is below the measured peak and has already failed in production.
+  # Preserve the existing tier: historical measured process peak ~974 MB.
+  # Do not resize based on the smaller, separate Cited demo's measurements.
   memory = "1536mb"
   cpus = 1

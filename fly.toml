@@ -33,9 +33,9 @@ primary_region = "lhr"          # London: nearest to the author and to UK reader
   # that breaks in the one that matters.
   CORPUS_VECTORS_FILE = "/opt/vectors/content.npz"
 
-  # ANTHROPIC_API_KEY is NOT set here. This file is committed, so anything in it
-  # is public. The key is set with `fly secrets set`, which stores it encrypted
-  # and injects it at runtime without it ever entering the repository or an
+  # Provider API keys are NOT set here. This file is committed, so anything in it
+  # is public. Approved keys are set with `fly secrets set`, stored encrypted
+  # and injected at runtime without entering the repository or an
   # image layer.
 
 [http_service]

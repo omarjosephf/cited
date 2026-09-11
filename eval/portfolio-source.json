@@ -1,0 +1,6 @@
+{
+  "repository": "omarjosephf/ojflorendo-portfolio",
+  "commit": "b6fecb7c52c30586f801b925ffe3d642d00defe4",
+  "corpus": "content/assistant",
+  "questions": "content/assistant-eval/questions.toml"
+}

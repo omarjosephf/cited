@@ -48,7 +48,9 @@ def build_stage_sources(dockerfile: str) -> list[str]:
     sources: list[str] = []
     for line in dockerfile.splitlines():
         stripped = line.strip()
-        if stripped.startswith("RUN pip install"):
+        if stripped.startswith(
+            "RUN python -m pip install --no-deps --no-build-isolation"
+        ):
             break  # everything after this is too late to matter
         if stripped.startswith("COPY ") and "--from" not in stripped:
             tokens = stripped.split()[1:]
@@ -100,10 +102,15 @@ class TestBuildStageHasEverythingItNeeds:
         assert isinstance(requires, str)
         minimum = requires.removeprefix(">=").strip()
 
-        images = re.findall(r"^FROM python:(\S+)", dockerfile, re.MULTILINE)
+        images = re.findall(r"^ARG PYTHON_IMAGE=python:(\S+)", dockerfile, re.MULTILINE)
         assert images, "no python base image found"
-        assert set(images) == {f"{minimum}-slim"}, (
-            f"pyproject requires Python {minimum} but the image(s) are {images}"
+        assert all(
+            re.fullmatch(rf"{re.escape(minimum)}-slim@sha256:[0-9a-f]{{64}}", image)
+            for image in images
+        ), f"pyproject requires Python {minimum} but the image(s) are {images}"
+        assert (
+            len(re.findall(r"^FROM \$\{PYTHON_IMAGE\} AS", dockerfile, re.MULTILINE))
+            == 2
         )
         assert f"/install/lib/python{minimum}/site-packages" in dockerfile, (
             "the site-packages path in the model-download step is hardcoded and "
@@ -362,7 +369,13 @@ class TestSecondDeploymentIsCoherent:
         """
         env: dict[str, str] = oj_fly["env"]
 
-        forbidden_keys = {"ANTHROPIC_API_KEY", "SHARED_SECRET"}
+        forbidden_keys = {
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "SHARED_SECRET",
+            "SUPABASE_SECRET_KEY",
+        }
         assert not forbidden_keys & set(env), (
             "this file is committed; secrets belong in `fly secrets set`"
         )
@@ -376,20 +389,55 @@ class TestSecondDeploymentIsCoherent:
         assert oj_fly["env"]["RETRIEVAL_TOP_K"] == "4"
         assert oj_fly["env"]["ANSWER_MAX_TOKENS"] == "1024"
 
-    def test_scale_to_zero_is_paired_with_its_consequence_in_writing(self) -> None:
-        """The trade is only sound if the reader knows the counter resets.
+    def test_budget_storage_is_persistent_and_startup_cannot_invent_identity(
+        self, oj_fly: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import PurePosixPath
 
-        A future maintainer reading `min_machines_running = 0` and
-        `DAILY_ANSWER_LIMIT = 40` would reasonably conclude the spend is capped
-        at 40 answers a day. It is not: the machine stops when idle and the
-        counter starts again at zero. The comment is the only thing that carries
-        that, so its absence is a defect.
-        """
-        config = (REPO / "fly.oj-assistant.toml").read_text(encoding="utf-8").lower()
+        from pydantic import ValidationError
 
-        assert "min_machines_running = 0" in config
-        assert "reset" in config
-        assert "spend cap" in config or "provider cap" in config
+        from assistant.settings import Settings
+
+        env = oj_fly["env"]
+        mounts = oj_fly["mounts"]
+        assert len(mounts) == 1
+        assert PurePosixPath(env["BUDGET_PATH"]).parent == PurePosixPath(
+            mounts[0]["destination"]
+        )
+        assert mounts[0]["destination"] == "/data"
+        assert mounts[0]["initial_size"].lower() == "1gb"
+        assert not any(key.startswith("auto_extend") for key in mounts[0])
+        # A copied public config alone must not create or choose a ledger.
+        for name in ("BUDGET_LEDGER_ID", "BUDGET_MACHINE_ID"):
+            monkeypatch.delenv(name, raising=False)
+            assert name not in env
+        with pytest.raises(ValidationError, match="path and ledger identity"):
+            Settings(_env_file=None, **{k.lower(): v for k, v in env.items()})  # type: ignore[call-arg]
+
+    def test_operating_caps_and_worker_settings_validate_against_runtime(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        from assistant.settings import Settings
+
+        configured = {k.lower(): v for k, v in oj_fly["env"].items()}
+        settings = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            **configured,
+            budget_ledger_id="a" * 64,
+            budget_machine_id="synthetic-pinned-machine",
+        )
+        assert settings.answer_workers == 1
+        assert settings.daily_budget_micro_usd // 40000 == 10
+        assert settings.monthly_budget_micro_usd // 40000 == 50
+        assert settings.daily_answer_limit == 40
+        assert settings.monthly_answer_limit == 200
+
+    def test_cutover_does_not_bootstrap_in_a_volumeless_release_machine(
+        self, oj_fly: dict[str, Any]
+    ) -> None:
+        assert "release_command" not in oj_fly["deploy"]
+        assert oj_fly["deploy"]["strategy"] == "rolling"
+        assert oj_fly["deploy"]["max_unavailable"] == 1
 
     def test_the_deploy_command_names_the_config_and_disables_ha(self) -> None:
         """Two traps, both of which produce a working deployment of the wrong

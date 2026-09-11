@@ -30,6 +30,7 @@ from assistant.answering import (
     Answer,
     Citation,
     Turn,
+    evidence_id,
 )
 from assistant.budget import DailyCallBudget
 from assistant.chunking import Chunk, chunk_passages
@@ -37,6 +38,7 @@ from assistant.documents import read_corpus
 from assistant.embedding import MODEL_NAME
 from assistant.metrics import AssistantMetrics
 from assistant.retrieval import SearchResult
+from assistant.runtime import BoundedAnswerExecutor, ExecutionContext
 from assistant.settings import Settings
 from assistant.vectors import VectorsMismatch
 from assistant.vectors import save as save_vectors
@@ -57,12 +59,18 @@ def grounded_answer() -> Answer:
         text="Four parts: role, task, context and format.",
         citations=(
             Citation(
-                quoted_text="role, task, context and format",
+                quoted_text="Body of chunk 0.",
+                source_id="guide.md",
+                evidence_id=evidence_id(
+                    SearchResult(chunk=chunk(), score=0.8), "Body of chunk 0."
+                ),
                 source="guide.md — Components",
                 chunk_index=0,
             ),
         ),
         grounded=True,
+        stop_reason="end_turn",
+        model_route="primary",
         results=(SearchResult(chunk=chunk(), score=0.8),),
     )
 
@@ -74,11 +82,23 @@ class StubAnswerer:
         self.questions: list[str] = []
         self.histories: list[tuple[Turn, ...]] = []
 
-    def answer(self, question: str, history: Sequence[Turn] = ()) -> Answer:
+    def answer(
+        self,
+        question: str,
+        history: Sequence[Turn] = (),
+        *,
+        context: ExecutionContext | None = None,
+    ) -> Answer:
         self.questions.append(question)
         self.histories.append(tuple(history))
+        if context is not None:
+            context.begin_provider("primary", "gemini-3.5-flash-lite")
         if self.error:
+            if context is not None:
+                context.finish_provider("uncertain")
             raise self.error
+        if context is not None:
+            context.finish_provider("completed", input_tokens=10, output_tokens=10)
         return self.answer_value
 
 
@@ -96,7 +116,7 @@ def client() -> Iterator[TestClient]:
     Skipping lifespan keeps these tests fast, independent of `content/`, and
     actually in charge of the state they assert on.
     """
-    api.state.settings = Settings(anthropic_api_key=SecretStr("test-key"))
+    api.state.settings = Settings(_env_file=None)  # type: ignore[call-arg]
     api.state.answerer = StubAnswerer()  # type: ignore[assignment]
     api.state.budget = DailyCallBudget(limit=100)
     api.state.metrics = AssistantMetrics()
@@ -108,7 +128,12 @@ def client() -> Iterator[TestClient]:
     # slowapi keeps counters between tests otherwise, so the first test to run
     # would consume the allowance for the rest.
     api.limiter.reset()
-    yield TestClient(api.app)
+    api.state.warmup = None
+    api.state.executor = BoundedAnswerExecutor(1)
+    try:
+        yield TestClient(api.app)
+    finally:
+        api.state.executor.shutdown(wait=True)
 
 
 class TestAsk:
@@ -117,8 +142,8 @@ class TestAsk:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["grounded"] is True
-        assert body["citations"][0]["source"] == "guide.md — Components"
+        assert body["state"] == "answered"
+        assert body["citations"][0]["source_id"] == "guide.md"
         assert body["citations"][0]["quote"]
 
     def test_an_ungrounded_answer_is_flagged_not_hidden(
@@ -135,9 +160,12 @@ class TestAsk:
         )
         body = client.post("/ask", json={"question": "anything"}).json()
 
-        assert body["grounded"] is False
-        assert body["refused"] is True
-        assert body["answer"] == "Not covered."
+        assert body == {
+            "version": 3,
+            "state": "not-covered",
+            "policy": "unsupported",
+            "model_route": None,
+        }
 
     def test_the_question_is_passed_through_stripped(self, client: TestClient) -> None:
         stub = StubAnswerer()
@@ -177,21 +205,19 @@ class TestBudget:
         response = client.post("/ask", json={"question": "two"})
 
         assert response.status_code == 503
-        assert "daily limit" in response.json()["detail"]
+        assert response.json()["detail"] == "The answering service is unavailable."
 
-    def test_a_failed_call_refunds_its_reservation(self, client: TestClient) -> None:
-        """A provider outage must not burn the day's allowance.
-
-        Otherwise an hour of upstream failure leaves the demo unable to answer
-        anything for the rest of the day, having answered nothing.
-        """
+    def test_an_uncertain_failed_call_keeps_its_reservation(
+        self, client: TestClient
+    ) -> None:
+        """An error after dispatch cannot prove that no billable attempt occurred."""
         api.state.answerer = StubAnswerer(error=RuntimeError("upstream down"))  # type: ignore[assignment]
         before = api.state.budget.used
 
         response = client.post("/ask", json={"question": "anything"})
 
         assert response.status_code == 502
-        assert api.state.budget.used == before
+        assert api.state.budget.used == before + 1
 
     def test_an_upstream_failure_does_not_leak_internals(
         self, client: TestClient
@@ -379,7 +405,6 @@ class TestSharedSecret:
 
     def secured(self, secret: str = "correct-horse") -> None:
         api.state.settings = Settings(
-            anthropic_api_key=SecretStr("test-key"),
             shared_secret=SecretStr(secret),
             require_shared_secret=True,
         )
@@ -512,7 +537,6 @@ class TestMetrics:
         """How often an assistant refuses is operational information about
         someone's business, not something a passer-by is owed."""
         api.state.settings = Settings(
-            anthropic_api_key=SecretStr("test-key"),
             shared_secret=SecretStr("correct-horse"),
             require_shared_secret=True,
         )
@@ -708,13 +732,29 @@ class TestStartup:
         return made
 
     @pytest.fixture(autouse=True)
-    def _clean_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _clean_environment(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         for name in ("CORPUS_DIR", "CORPUS_VECTORS_FILE", "CORPUS_CHECKSUM"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("REQUIRE_SHARED_SECRET", "false")
-        # The lifespan builds a provider client, which refuses to exist without
-        # a key. Nothing here calls it: these tests never reach /ask.
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+        # The lifespan builds the complete pair. These values never dispatch:
+        # startup tests do not reach /ask.
+        monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+        monkeypatch.setenv("OPENAI_PROJECT_ID", "test-project")
+        monkeypatch.setenv("OPENAI_ACCOUNT_VERIFIED", "true")
+        monkeypatch.setenv("GEMINI_API_KEY", "not-a-real-key")
+        monkeypatch.setenv("GEMINI_PROJECT_ID", "test-project")
+        monkeypatch.setenv("GEMINI_ACCOUNT_VERIFIED", "true")
+        monkeypatch.setenv("ENABLE_FALLBACK", "true")
+        from assistant.persistent_budget import BudgetLimits, initialize_ledger
+
+        budget_path = tmp_path / "startup-budget.sqlite3"
+        initialize_ledger(budget_path, "a" * 64, BudgetLimits())
+        monkeypatch.setenv("BUDGET_PATH", str(budget_path))
+        monkeypatch.setenv("BUDGET_LEDGER_ID", "a" * 64)
+        for name in ("BUDGET_MACHINE_ID", "FLY_APP_NAME", "FLY_MACHINE_ID"):
+            monkeypatch.delenv(name, raising=False)
 
     def test_precomputed_vectors_are_used_instead_of_embedding_the_corpus(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: Any
@@ -794,3 +834,86 @@ class TestStartup:
                 raise RuntimeError("model cache is unreadable")
 
         asyncio.run(api.warm_embedder(Broken()))
+
+
+class TestOwnerAnswerEvents:
+    def test_only_secret_authenticated_opt_in_receives_observations(
+        self, client: TestClient
+    ) -> None:
+        import base64
+        import json
+
+        api.state.settings.shared_secret = SecretStr("synthetic-management-secret")
+        api.state.prompt_checksum = "a" * 64
+        for headers in (
+            {},
+            {"X-Assistant-Event": "1"},
+            {"X-Assistant-Secret": "synthetic-management-secret"},
+        ):
+            response = client.post(
+                "/ask", json={"question": "A question?"}, headers=headers
+            )
+            assert "X-Assistant-Event" not in response.headers
+        response = client.post(
+            "/ask",
+            json={"question": "A question?"},
+            headers={
+                "X-Assistant-Event": "1",
+                "X-Assistant-Secret": "synthetic-management-secret",
+            },
+        )
+        assert response.status_code == 200
+        raw = response.headers["X-Assistant-Event"]
+        event = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        assert event["retrieved"] == ["guide.md"]
+        assert event["cited"] == ["guide.md"]
+        assert event["outcome"] == "answered"
+        assert event["model"] == "gemini-3.5-flash-lite"
+        assert event["promptSha256"] == "a" * 64
+        assert "question" not in event and "answer" not in event
+        assert "event" not in response.json()
+
+    def test_refusal_does_not_claim_a_missing_content_diagnosis(
+        self, client: TestClient
+    ) -> None:
+        import base64
+        import json
+
+        api.state.settings.shared_secret = SecretStr("synthetic-management-secret")
+        api.state.prompt_checksum = "a" * 64
+        api.state.answerer = StubAnswerer(
+            Answer(
+                text="NOT_IN_DOCUMENTS",
+                citations=(),
+                grounded=False,
+                refused=True,
+                results=(),
+                model_route="primary",
+            )
+        )  # type: ignore[assignment]
+        response = client.post(
+            "/ask",
+            json={"question": "A question?"},
+            headers={
+                "X-Assistant-Event": "1",
+                "X-Assistant-Secret": "synthetic-management-secret",
+            },
+        )
+        raw = response.headers["X-Assistant-Event"]
+        event = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        assert event["outcome"] == "not_covered"
+        assert event["retrieved"] == event["cited"] == []
+
+    def test_unknown_runtime_identity_omits_the_event(self, client: TestClient) -> None:
+        api.state.settings.shared_secret = SecretStr("synthetic-management-secret")
+        api.state.prompt_checksum = ""
+        response = client.post(
+            "/ask",
+            json={"question": "A question?"},
+            headers={
+                "X-Assistant-Event": "1",
+                "X-Assistant-Secret": "synthetic-management-secret",
+            },
+        )
+        assert response.status_code == 200
+        assert "X-Assistant-Event" not in response.headers

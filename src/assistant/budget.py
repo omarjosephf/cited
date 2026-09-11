@@ -1,19 +1,16 @@
-"""A hard ceiling on what the service may spend.
+"""An in-memory limit on provider attempts per process and UTC day.
 
 Rate limiting bounds how fast money leaves; it does not bound how much. A limit
 of one question per five seconds still permits roughly seventeen thousand paid
 calls a day, and an unauthenticated endpoint making paid calls is a financial
 denial-of-service waiting to happen.
 
-This is the control that makes the loss finite. It is deliberately crude: it
-counts calls rather than tokens, because a count cannot be wrong in the
-direction that costs money. Token accounting would be more accurate and would
-fail open if the accounting itself had a bug.
-
-**This is not the only defence, and should not be the last one.** The provider's
-own spend cap is enforced by someone with no bug in this file. This exists so
-the service stops before that limit is reached, with an explanation, rather than
-failing with a billing error.
+This counts dispatch attempts, not money. It resets on restart and does not
+coordinate replicas; it cannot enforce a durable daily or monthly spend cap.
+Uncertain attempts keep their reservations. Production also requires verified
+provider spending controls and durable shared admission/accounting where the
+deployment can restart or scale. Provider caps may themselves have enforcement
+delay, so retain headroom rather than promising zero possible overage.
 """
 
 from __future__ import annotations
@@ -21,6 +18,19 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from typing import Protocol
+
+
+class AttemptBudget(Protocol):
+    """The reservation boundary shared by runtime and offline test budgets."""
+
+    def spend(self) -> None: ...
+
+    @property
+    def used(self) -> int: ...
+
+    @property
+    def remaining(self) -> int: ...
 
 
 class BudgetExhausted(RuntimeError):
@@ -70,17 +80,6 @@ class DailyCallBudget:
                     f"daily limit of {self.limit} answered questions reached"
                 )
             self._used += 1
-
-    def refund(self) -> None:
-        """Return a reservation when the call did not happen.
-
-        Without this, a failed request would still consume budget, and a
-        provider outage would silently burn the day's allowance without
-        answering anything.
-        """
-        with self._lock:
-            self._roll()
-            self._used = max(0, self._used - 1)
 
     @property
     def used(self) -> int:

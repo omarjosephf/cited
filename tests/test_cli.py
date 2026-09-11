@@ -12,11 +12,14 @@ exit codes, which is where CLI bugs actually live.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from assistant import cli
+from assistant.release_manifest import ANSWER_RUNTIME_SOURCES
+from assistant.settings import Settings
 
 
 @pytest.fixture
@@ -117,18 +120,19 @@ class TestEval:
 
 
 class TestAsk:
-    def test_it_refuses_to_run_without_a_key_and_says_what_still_works(
+    def test_it_refuses_without_the_complete_pair_and_says_what_still_works(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        monkeypatch.setenv("OPENAI_PROJECT_ID", "")
+        monkeypatch.setenv("OPENAI_ACCOUNT_VERIFIED", "false")
+        monkeypatch.setenv("ENABLE_FALLBACK", "false")
 
         code = cli.main(["ask", "a question"])
 
         assert code == 2
         error = capsys.readouterr().err
-        assert "ANTHROPIC_API_KEY" in error
-        # An error that only says "no" is worse than one that says what to do.
-        assert ".env" in error
+        assert "complete verified primary and fallback configuration" in error
         assert "index" in error and "eval" in error
 
 
@@ -208,14 +212,27 @@ class TestInspect:
 
 
 class TestEvalIsFreeUnlessPaidIsRequested:
-    """The command-line guarantee: a key alone can never start spending.
+    """The command-line guarantee: configuration alone cannot start spending.
 
     These are the regression tests for a real incident. A command intended as a
     dry run was executed while `ANTHROPIC_API_KEY` was set in a `.env` file; the
     old code took "a key is configured" to mean "run the paid half", and made 48
-    billable calls. Nothing here relies on a key being absent, because in the
-    incident it was present.
+    billable calls. Paid multi-provider capture is now disabled before any client
+    construction; these tests preserve that boundary.
     """
+
+    @pytest.fixture(autouse=True)
+    def deterministic_retrieval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from assistant.chunking import Chunk
+        from assistant.retrieval import SearchResult
+
+        class FixedRetriever:
+            def search(self, text: str, top_k: int = 4) -> list[SearchResult]:
+                return [
+                    SearchResult(Chunk("Body text.", "doc.md", None, "Wanted", 0), 0.9)
+                ]
+
+        monkeypatch.setattr(cli, "_build_retriever", lambda path: FixedRetriever())
 
     def corpus_and_questions(self, tmp_path: Path) -> tuple[Path, Path]:
         corpus = tmp_path / "content"
@@ -240,7 +257,7 @@ class TestEvalIsFreeUnlessPaidIsRequested:
     ) -> None:
         """The incident, as a test."""
         corpus, questions = self.corpus_and_questions(tmp_path)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
         # Any attempt to construct a provider client fails the test outright,
         # rather than being detected afterwards by counting calls.
@@ -257,12 +274,76 @@ class TestEvalIsFreeUnlessPaidIsRequested:
         out = capsys.readouterr().out
         assert "no provider call was made" in out
 
-    def test_paid_without_a_call_ceiling_is_refused(
+    def test_free_capture_records_v3_answer_runtime_identity(
+        self, tmp_path: Path
+    ) -> None:
+        corpus, questions = self.corpus_and_questions(tmp_path)
+        output = tmp_path / "identity.json"
+
+        code = cli.main(
+            [
+                "--corpus",
+                str(corpus),
+                "eval",
+                "--questions",
+                str(questions),
+                "--output",
+                str(output),
+            ]
+        )
+
+        assert code == 0
+        captured = json.loads(output.read_text(encoding="utf-8"))
+        assert captured["answer_contract_version"] == 3
+        assert tuple(captured["answer_runtime_sha256"]) == ANSWER_RUNTIME_SOURCES
+        assert all(
+            len(value) == 64 for value in captured["answer_runtime_sha256"].values()
+        )
+
+    def test_answer_configuration_records_the_routed_behavior(self) -> None:
+        settings = Settings.model_construct(
+            answer_model="gemini-3.5-flash-lite",
+            fallback_answer_model="gpt-5.6-luna",
+            answer_effort="none",
+            answer_max_tokens=1024,
+            prefilter_score=0.45,
+            backend_timeout_seconds=8.0,
+            provider_timeout_seconds=6.0,
+            primary_timeout_seconds=3.0,
+            validation_margin_seconds=0.5,
+        )
+
+        assert cli._answer_configuration(settings, 4) == {
+            "primary_model": "gemini-3.5-flash-lite",
+            "fallback_model": "gpt-5.6-luna",
+            "answer_effort": "none",
+            "answer_max_tokens": 1024,
+            "top_k": 4,
+            "prefilter_score": 0.45,
+            "backend_timeout_seconds": 8.0,
+            "provider_timeout_seconds": 6.0,
+            "primary_timeout_seconds": 3.0,
+            "validation_margin_seconds": 0.5,
+            "wire_version": 3,
+            "max_attempts": 2,
+            "retries": 0,
+            "fallback_mode": "availability_only",
+            "complete_pair_required": True,
+            "max_provider_request_bytes": 32000,
+            "attempt_reservation_micro_usd": 40000,
+            "daily_attempt_limit": 40,
+            "monthly_attempt_limit": 200,
+            "daily_budget_micro_usd": 400000,
+            "monthly_budget_micro_usd": 2000000,
+            "shared_worker_limit": 1,
+            "budget_storage": "persistent_local_sqlite",
+        }
+
+    def test_paid_capture_is_disabled_without_constructing_a_client(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Spending authority is granted as a number, so the number is required."""
         corpus, questions = self.corpus_and_questions(tmp_path)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
         monkeypatch.setattr(
             "assistant.answering.build_client",
             lambda *a, **k: (_ for _ in ()).throw(
@@ -276,11 +357,11 @@ class TestEvalIsFreeUnlessPaidIsRequested:
 
         assert code == 2
 
-    def test_paid_without_a_key_exits_rather_than_pretending_to_run(
+    def test_paid_capture_stays_disabled_without_provider_configuration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         corpus, questions = self.corpus_and_questions(tmp_path)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("OPENAI_API_KEY", "")
 
         code = cli.main(
             [
@@ -290,6 +371,10 @@ class TestEvalIsFreeUnlessPaidIsRequested:
                 "--questions",
                 str(questions),
                 "--paid",
+                "--spec-version",
+                "3.0",
+                "--output",
+                str(tmp_path / "run.json"),
                 "--max-paid-calls",
                 "10",
             ]
@@ -297,16 +382,14 @@ class TestEvalIsFreeUnlessPaidIsRequested:
 
         assert code == 2
 
-    def test_a_run_needing_more_calls_than_authorised_never_starts(
+    def test_disabled_capture_does_not_reach_the_legacy_call_ceiling(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Refused during preflight, before the first call rather than at the
-        ceiling — so an over-large run costs nothing at all."""
         corpus, questions = self.corpus_and_questions(tmp_path)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
         monkeypatch.setattr(
             "assistant.answering.build_client",
             lambda *a, **k: (_ for _ in ()).throw(
@@ -322,23 +405,27 @@ class TestEvalIsFreeUnlessPaidIsRequested:
                 "--questions",
                 str(questions),
                 "--paid",
+                "--spec-version",
+                "3.0",
+                "--output",
+                str(tmp_path / "run.json"),
                 "--max-paid-calls",
                 "0",
             ]
         )
 
         assert code == 2
-        assert "No calls were made" in capsys.readouterr().err
+        assert "Paid evaluation capture is disabled" in capsys.readouterr().err
 
-    def test_the_preflight_never_prints_the_key(
+    def test_disabled_capture_never_prints_an_environment_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         corpus, questions = self.corpus_and_questions(tmp_path)
-        secret = "sk-ant-verysecretvalue12345"
-        monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+        secret = "synthetic-secret-value-12345"
+        monkeypatch.setenv("OPENAI_API_KEY", secret)
         monkeypatch.setattr(
             "assistant.answering.build_client",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call expected")),
@@ -352,6 +439,10 @@ class TestEvalIsFreeUnlessPaidIsRequested:
                 "--questions",
                 str(questions),
                 "--paid",
+                "--spec-version",
+                "3.0",
+                "--output",
+                str(tmp_path / "run.json"),
                 "--max-paid-calls",
                 "0",
             ]
@@ -360,4 +451,4 @@ class TestEvalIsFreeUnlessPaidIsRequested:
         captured = capsys.readouterr()
         assert secret not in captured.out
         assert secret not in captured.err
-        assert "configured (value not shown)" in captured.out
+        assert "Paid evaluation capture is disabled" in captured.err

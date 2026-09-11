@@ -1,0 +1,214 @@
+{
+  "$defs": {
+    "Artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "title": "Artifact",
+      "type": "object"
+    },
+    "EmbeddingIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "const": "BAAI/bge-small-en-v1.5",
+          "title": "Model",
+          "type": "string"
+        },
+        "dimensions": {
+          "const": 384,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "model_lock": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "vectors": {
+          "$ref": "#/$defs/Artifact"
+        }
+      },
+      "required": [
+        "model",
+        "dimensions",
+        "model_lock",
+        "vectors"
+      ],
+      "title": "EmbeddingIdentity",
+      "type": "object"
+    },
+    "EvaluationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "suite": {
+          "enum": [
+            "demo",
+            "portfolio"
+          ],
+          "title": "Suite",
+          "type": "string"
+        },
+        "corpus_path": {
+          "title": "Corpus Path",
+          "type": "string"
+        },
+        "corpus_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Corpus Sha256",
+          "type": "string"
+        },
+        "questions": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "prompt": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "run": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "review": {
+          "$ref": "#/$defs/Artifact"
+        }
+      },
+      "required": [
+        "suite",
+        "corpus_path",
+        "corpus_sha256",
+        "questions",
+        "prompt",
+        "run",
+        "review"
+      ],
+      "title": "EvaluationEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "deployment": {
+      "enum": [
+        "oj-assistant",
+        "cited-demo"
+      ],
+      "title": "Deployment",
+      "type": "string"
+    },
+    "frontend_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Frontend Commit",
+      "type": "string"
+    },
+    "backend_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Backend Commit",
+      "type": "string"
+    },
+    "backend_image": {
+      "pattern": "^[^\\s]+@sha256:[0-9a-f]{64}$",
+      "title": "Backend Image",
+      "type": "string"
+    },
+    "python_base": {
+      "pattern": "^python:3\\.12[^\\s]*@sha256:[0-9a-f]{64}$",
+      "title": "Python Base",
+      "type": "string"
+    },
+    "runtime_lock": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "review_code": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "policy": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "corpus_path": {
+      "title": "Corpus Path",
+      "type": "string"
+    },
+    "corpus_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Corpus Sha256",
+      "type": "string"
+    },
+    "prompt": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "embedding": {
+      "$ref": "#/$defs/EmbeddingIdentity"
+    },
+    "spec_version": {
+      "const": "3.0",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "top_k": {
+      "const": 4,
+      "title": "Top K",
+      "type": "integer"
+    },
+    "answer_max_tokens": {
+      "const": 1024,
+      "title": "Answer Max Tokens",
+      "type": "integer"
+    },
+    "answer_model": {
+      "const": "claude-haiku-4-5",
+      "title": "Answer Model",
+      "type": "string"
+    },
+    "evaluations": {
+      "items": {
+        "$ref": "#/$defs/EvaluationEvidence"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "title": "Evaluations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "deployment",
+    "frontend_commit",
+    "backend_commit",
+    "backend_image",
+    "python_base",
+    "runtime_lock",
+    "evaluator",
+    "review_code",
+    "policy",
+    "corpus_path",
+    "corpus_sha256",
+    "prompt",
+    "embedding",
+    "spec_version",
+    "top_k",
+    "answer_max_tokens",
+    "answer_model",
+    "evaluations"
+  ],
+  "title": "ReleaseManifest",
+  "type": "object"
+}

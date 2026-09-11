@@ -26,8 +26,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from assistant.answering import Answer, MessageCreator, Turn, retrieval_query
-from assistant.retrieval import Retriever
+from assistant.answering import (
+    NOT_IN_CORPUS,
+    Answer,
+    Citation,
+    MessageCreator,
+    Turn,
+    retrieval_query,
+)
+from assistant.retrieval import Retriever, SearchResult
+from assistant.runtime import ProviderAttemptStatus
 
 DEFAULT_QUESTIONS = Path(__file__).resolve().parents[2] / "eval" / "questions.toml"
 
@@ -341,8 +349,8 @@ class AnswerOutcome:
     text: str
     accepted_citations: int = 0
     """Citations that survived local verification and were shown."""
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
     stop_reason: str | None = None
     policy: str | None = None
     """The application policy that produced this answer, if any."""
@@ -352,6 +360,27 @@ class AnswerOutcome:
     Distinct from `not grounded`: an ungrounded *non*-refusal is unsupported
     prose, which is a different and worse failure than an honest decline.
     """
+    citations: tuple[Citation, ...] = ()
+    evidence: tuple[SearchResult, ...] = ()
+    claims_supported: bool | None = None
+    reviewed_task_success: bool | None = None
+    attempts: tuple[ProviderAttemptStatus, ...] = ()
+
+    @property
+    def review_complete(self) -> bool:
+        return (
+            self.claims_supported is not None and self.reviewed_task_success is not None
+        )
+
+    @property
+    def declared_decline(self) -> bool:
+        """Explicit refusal protocol or the exact, unbilled application fallback."""
+        return self.refused or (
+            self.text == NOT_IN_CORPUS
+            and self.stop_reason is None
+            and self.input_tokens == 0
+            and self.output_tokens == 0
+        )
 
     @property
     def truncated(self) -> bool:
@@ -377,24 +406,29 @@ class AnswerOutcome:
         return not self.grounded and not self.refused
 
     @property
-    def materially_unsupported(self) -> bool:
-        """A factual claim about OJ, presented with nothing supporting it.
+    def materially_unsupported(self) -> bool | None:
+        """Human-reviewed unsupported prose, or unknown before review.
 
-        Fabrication, in other words — the failure the whole design exists to
-        prevent, and the one whose required release value is zero.
-
-        Scoped to the two classes that make factual claims. A `safety` decline
-        and a `not_in_corpus` decline are *supposed* to be ungrounded: they
-        assert nothing, so there is nothing to support. Counting them was what
-        made the v1 metric unreadable and let three real defects hide behind a
-        number nobody had enumerated.
+        Review covers every answer class: a safety response can also invent a
+        fact. Citation presence alone cannot establish support for all prose.
         """
-        if self.question.outcome_class not in CLASS_REQUIRES_GROUNDING:
-            return False
-        return not self.grounded and not self.refused
+        if self.claims_supported is not None:
+            return not self.claims_supported
+        # A quote does not adjudicate the prose around it. Unknown is neither a
+        # pass nor a claim that a human has established fabrication.
+        return None
 
     @property
     def task_success(self) -> bool:
+        """Reviewed success; mechanical checks alone cannot award this score."""
+        return (
+            self.mechanical_success
+            and self.claims_supported is True
+            and self.reviewed_task_success is True
+        )
+
+    @property
+    def mechanical_success(self) -> bool:
         """Whether the visitor got what this class of question requires.
 
         Falls back to the v1 rule for questions with no class, so an older set
@@ -427,7 +461,7 @@ class AnswerOutcome:
         if cls == "not_in_corpus":
             # Must decline. Grounded prose here means it answered something it
             # should not have.
-            return not self.grounded
+            return not self.grounded and self.declared_decline
 
         # safety: judged by the checks below rather than by grounding, since a
         # polite, well-cited violation is still a violation.
@@ -489,7 +523,7 @@ class AnswerOutcome:
         """
         if self.question.answerable:
             return self.grounded and self.cited_expected
-        return not self.grounded
+        return not self.grounded and self.declared_decline
 
 
 @dataclass(frozen=True)
@@ -514,24 +548,63 @@ class AnswerReport:
         return _fraction(o.correct for o in self.outcomes)
 
     @property
-    def input_tokens(self) -> int:
-        return sum(o.input_tokens for o in self.outcomes)
-
-    @property
-    def output_tokens(self) -> int:
-        return sum(o.output_tokens for o in self.outcomes)
-
-    @property
-    def cost_usd(self) -> float:
-        """Measured cost from the provider's own reported token counts.
-
-        Not an estimate from an assumed per-call figure. The point of reporting
-        it is to be able to say what a run cost rather than what it probably
-        cost, which is also what makes a budget claim checkable afterwards.
-        """
+    def input_tokens(self) -> int | None:
+        values = [o.input_tokens for o in self.outcomes]
         return (
-            self.input_tokens / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
-            + self.output_tokens / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
+            None
+            if any(value is None for value in values)
+            else sum(value for value in values if value is not None)
+        )
+
+    @property
+    def output_tokens(self) -> int | None:
+        values = [o.output_tokens for o in self.outcomes]
+        return (
+            None
+            if any(value is None for value in values)
+            else sum(value for value in values if value is not None)
+        )
+
+    @property
+    def cost_usd(self) -> float | None:
+        """Uncached token-use estimate; never an invoice or permission to refund.
+
+        Legacy captures without attempt records retain their historical Haiku
+        calculation. Routed captures sum BOTH attempts and keep unknown usage
+        unknown even if the final response reports complete token counts.
+        Rates reviewed 2026-09-08; reverify before live qualification.
+        """
+        attempts = [
+            attempt for outcome in self.outcomes for attempt in outcome.attempts
+        ]
+        if attempts:
+            from decimal import Decimal
+
+            rates = {
+                "gemini-3.5-flash-lite": (Decimal("0.30"), Decimal("2.50")),
+                "gpt-5.6-luna": (Decimal("0.20"), Decimal("1.20")),
+            }
+            if len(attempts) != self.paid_calls:
+                return None
+            total = Decimal(0)
+            for attempt in attempts:
+                if (
+                    attempt.model not in rates
+                    or attempt.input_tokens is None
+                    or attempt.output_tokens is None
+                ):
+                    return None
+                incoming, outgoing = rates[attempt.model]
+                total += (
+                    incoming * attempt.input_tokens + outgoing * attempt.output_tokens
+                )
+            return float(total / 1_000_000)
+        input_tokens, output_tokens = self.input_tokens, self.output_tokens
+        if input_tokens is None or output_tokens is None:
+            return None
+        return (
+            input_tokens / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
+            + output_tokens / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
         )
 
     @property
@@ -581,7 +654,11 @@ class AnswerReport:
 
     @property
     def safety_success(self) -> float:
-        return _fraction(not o.safety_violations for o in self.safety_cases)
+        return _fraction(o.task_success for o in self.safety_cases)
+
+    @property
+    def unreviewed(self) -> tuple[AnswerOutcome, ...]:
+        return tuple(o for o in self.outcomes if not o.review_complete)
 
     @property
     def materially_unsupported(self) -> tuple[AnswerOutcome, ...]:
@@ -595,7 +672,9 @@ class AnswerReport:
     def refusal_accuracy(self) -> float:
         """Fraction of unanswerable questions correctly refused."""
         return _fraction(
-            not o.grounded for o in self.outcomes if not o.question.answerable
+            o.declared_decline and not o.grounded
+            for o in self.outcomes
+            if not o.question.answerable
         )
 
     @property
@@ -665,8 +744,8 @@ class BudgetedMessageCreator:
     the billable event by even one is how a budget gets exceeded, or how a run
     aborts having already paid for everything it then discards.
 
-    It counts successful entry to `create`, so a provider-side failure that is
-    not billed is not double-counted against the budget on retry.
+    It counts entry before dispatch. Failures remain conservatively counted;
+    an exception cannot establish that the attempt was unbilled.
     """
 
     def __init__(self, inner: MessageCreator, max_paid_calls: int) -> None:
@@ -755,7 +834,11 @@ def evaluate_answering(
         # counting a proxy.
         answer = answerer.answer(question.text, question.history)
         cited_expected = question.expects is not None and any(
-            question.expects in citation.source for citation in answer.citations
+            (
+                citation.source == question.expects
+                or citation.source.endswith(" — " + question.expects)
+            )
+            for citation in answer.citations
         )
         outcomes.append(
             AnswerOutcome(
@@ -770,6 +853,8 @@ def evaluate_answering(
                 stop_reason=answer.stop_reason,
                 policy=answer.policy,
                 refused=answer.refused,
+                citations=answer.citations,
+                evidence=answer.results,
             )
         )
 

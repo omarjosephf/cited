@@ -7,17 +7,21 @@ precisely when something has gone wrong and objects are being dumped.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal, Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-Effort = Literal["low", "medium", "high", "xhigh", "max"]
+Effort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 
 
 class Settings(BaseSettings):
     """Runtime configuration. Values come from the environment or a `.env` file."""
+
+    PROXY_TIMEOUT_SECONDS: ClassVar[float] = 9.0
+    UI_TIMEOUT_SECONDS: ClassVar[float] = 10.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -28,12 +32,21 @@ class Settings(BaseSettings):
         protected_namespaces=(),
     )
 
-    anthropic_api_key: SecretStr = Field(
+    openai_api_key: SecretStr = Field(
         default=SecretStr(""),
-        description=(
-            "Anthropic API key. Empty disables answering; retrieval still works."
-        ),
+        description="OpenAI API key. Empty disables answering; retrieval still works.",
     )
+    openai_project_id: str = ""
+    """Explicit OpenAI project boundary; required with the key."""
+
+    openai_account_verified: bool = False
+    """Operator configuration assertion, not machine verification."""
+
+    gemini_api_key: SecretStr = Field(default=SecretStr(""))
+    gemini_project_id: str = ""
+    gemini_account_verified: bool = False
+    enable_fallback: bool = False
+    """Fallback is opt-in and requires its complete account configuration."""
 
     corpus_dir: Path = Path("content")
     """Where the served documents live.
@@ -119,49 +132,34 @@ class Settings(BaseSettings):
     closed at startup rather than silently serving unauthenticated.
     """
 
-    answer_model: str = "claude-haiku-4-5"
+    answer_model: Literal["gemini-3.5-flash-lite"] = "gemini-3.5-flash-lite"
     """The model that reads retrieved passages and decides whether they answer.
 
-    Haiku by default. The task is reading four short passages and judging
-    whether they contain an answer — comprehension, not reasoning — and the
-    cheapest capable model is the right default for something served publicly.
-
-    Cost per 1,000 questions at roughly 1,200 input / 200 output tokens:
-    Opus 5 $11.00, Sonnet 5 $6.60, Haiku 4.5 $2.20. Whether Haiku actually
-    costs accuracy is a question for the evaluation harness, not for intuition.
+    Fixed to the owner-approved primary model. Model selection is not inferred
+    from whichever provider credential happens to be present.
     """
 
-    answer_max_tokens: int = 1024
-    """Enough for a grounded answer with citations; not enough to ramble."""
+    fallback_answer_model: Literal["gpt-5.6-luna"] = "gpt-5.6-luna"
 
-    answer_effort: Effort | None = None
-    """Thinking depth, or `None` to omit the parameter entirely.
+    answer_max_tokens: int = Field(default=1024, ge=1024, le=1024)
+    """Fixed to the 1024-token cap implemented by both approved adapters."""
 
-    **Not every model accepts this.** `effort` is supported on the Opus and
-    Sonnet tiers but is rejected by Haiku 4.5, so sending it unconditionally
-    would fail every request under the default model. It is therefore omitted
-    unless explicitly configured — and `Answerer` only includes `output_config`
-    in the request when it is set.
-
-    Set it when running on a model that supports it and the evaluation set shows
-    a reason to.
-    """
+    answer_effort: Literal["none"] = "none"
+    """The implemented low-latency Luna configuration; currently fixed to none."""
 
     retrieval_top_k: int = 4
     """How many chunks are put in front of the model."""
 
-    daily_answer_limit: int = 200
-    """Hard ceiling on paid calls per UTC day for the HTTP service.
+    daily_answer_limit: int = Field(default=40, ge=1, le=40)
+    monthly_answer_limit: int = Field(default=200, ge=1, le=200)
+    daily_budget_micro_usd: int = Field(default=400_000, ge=1, le=400_000)
+    monthly_budget_micro_usd: int = Field(default=2_000_000, ge=1, le=2_000_000)
+    """Combined API reservation limits; integer micro-USD, never invoice totals."""
 
-    At the default model this bounds the demo to roughly $0.44 a day. Rate
-    limiting alone would not: 10 requests a minute still permits over fourteen
-    thousand paid calls a day, which is a bill rather than a demo.
-
-    This is a stop *before* the provider's own cap, so the service can explain
-    itself rather than failing with a billing error. It is not a substitute for
-    setting that cap — this counter resets when the process restarts, and the
-    provider's does not.
-    """
+    budget_path: Path | None = None
+    budget_ledger_id: str = ""
+    budget_machine_id: str = ""
+    """Operator-pinned persistent ledger and sole permitted Fly Machine."""
 
     prefilter_score: float = 0.45
     """Below this, skip the paid call entirely.
@@ -172,10 +170,131 @@ class Settings(BaseSettings):
     obviously unrelated, where paying for a call is pointless.
     """
 
+    answer_workers: int = Field(default=1, ge=1, le=5)
+    """Maximum admitted synchronous answer jobs. One is the safe default."""
+
+    @field_validator(
+        "answer_workers",
+        "daily_answer_limit",
+        "monthly_answer_limit",
+        "daily_budget_micro_usd",
+        "monthly_budget_micro_usd",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_worker_count(cls, value: object) -> object:
+        """Accept environment strings while refusing bool-as-int coercion."""
+        if isinstance(value, bool):
+            raise ValueError("worker and budget limits must be integers, not booleans")
+        return value
+
+    backend_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        lt=PROXY_TIMEOUT_SECONDS,
+        allow_inf_nan=False,
+    )
+    """Monotonic backend budget, strictly inside the trusted proxy budget."""
+
+    provider_timeout_seconds: float = Field(
+        default=6.0,
+        gt=0.0,
+        lt=PROXY_TIMEOUT_SECONDS,
+        allow_inf_nan=False,
+    )
+    """Shared provider-phase duration across at most two serial attempts."""
+
+    primary_timeout_seconds: float = Field(
+        default=3.0, gt=0.0, lt=PROXY_TIMEOUT_SECONDS, allow_inf_nan=False
+    )
+    """Primary slice of the shared provider budget."""
+
+    validation_margin_seconds: float = Field(
+        default=0.5,
+        ge=0.0,
+        lt=PROXY_TIMEOUT_SECONDS,
+        allow_inf_nan=False,
+    )
+    """Budget preserved after the provider attempt for result validation."""
+
+    @model_validator(mode="after")
+    def validate_timeout_ordering(self) -> Self:
+        """Keep provider, backend, proxy and UI expiry strictly ordered."""
+        if (
+            self.provider_timeout_seconds + self.validation_margin_seconds
+            >= self.backend_timeout_seconds
+        ):
+            raise ValueError(
+                "provider_timeout_seconds + validation_margin_seconds must be "
+                "less than backend_timeout_seconds"
+            )
+        if not self.backend_timeout_seconds < self.PROXY_TIMEOUT_SECONDS:
+            raise ValueError(
+                "backend_timeout_seconds must be less than the 9 second proxy budget"
+            )
+        if not self.PROXY_TIMEOUT_SECONDS < self.UI_TIMEOUT_SECONDS:
+            raise ValueError("proxy timeout must be less than the UI timeout")
+        if self.primary_timeout_seconds > self.provider_timeout_seconds:
+            raise ValueError(
+                "primary_timeout_seconds must not exceed provider_timeout_seconds"
+            )
+        if bool(self.openai_api_key.get_secret_value()) != bool(
+            self.openai_project_id.strip()
+        ):
+            raise ValueError(
+                "OPENAI_API_KEY and OPENAI_PROJECT_ID must be set together"
+            )
+        if bool(self.gemini_api_key.get_secret_value()) != bool(
+            self.gemini_project_id.strip()
+        ):
+            raise ValueError(
+                "GEMINI_API_KEY and GEMINI_PROJECT_ID must be set together"
+            )
+        if self.enable_fallback and not all(
+            (
+                self.openai_api_key.get_secret_value(),
+                self.openai_project_id.strip(),
+                self.openai_account_verified,
+            )
+        ):
+            raise ValueError(
+                "Luna fallback requires its key, project ID and verified account"
+            )
+        if bool(self.budget_path) != bool(self.budget_ledger_id):
+            raise ValueError(
+                "budget path and ledger identity must be configured together"
+            )
+        if self.budget_ledger_id and not re.fullmatch(
+            r"[0-9a-f]{64}", self.budget_ledger_id
+        ):
+            raise ValueError("invalid budget ledger identity")
+        if self.budget_path and self.answer_workers != 1:
+            raise ValueError("persistent budget requires one shared answer worker")
+        if self.daily_answer_limit > self.monthly_answer_limit:
+            raise ValueError("daily attempt limit exceeds monthly limit")
+        if self.daily_budget_micro_usd > self.monthly_budget_micro_usd:
+            raise ValueError("daily money limit exceeds monthly limit")
+        return self
+
     @property
     def answering_enabled(self) -> bool:
-        """Whether a key is configured. Retrieval works without one."""
-        return bool(self.anthropic_api_key.get_secret_value())
+        """Whether the complete owner-selected two-provider arrangement is set."""
+        return (
+            bool(self.gemini_api_key.get_secret_value())
+            and bool(self.gemini_project_id.strip())
+            and self.gemini_account_verified
+            and self.fallback_enabled
+        )
+
+    @property
+    def fallback_enabled(self) -> bool:
+        """Whether operator-supplied Luna backup configuration is complete."""
+        return (
+            self.enable_fallback
+            and bool(self.openai_api_key.get_secret_value())
+            and bool(self.openai_project_id.strip())
+            and self.openai_account_verified
+        )
 
     def expected_corpus_checksum(self) -> str:
         """The digest to verify against: explicit value first, then the file.

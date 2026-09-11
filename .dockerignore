@@ -18,6 +18,7 @@
 # Version control and CI
 .git
 .github
+.ci
 .gitignore
 .gitattributes
 

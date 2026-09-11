@@ -24,8 +24,12 @@ from assistant.policy import (
     CONVERSATION_SOURCE_BREADTH_MAX,
     MIN_REPRODUCED_PASSAGES,
     NEAR_COMPLETE_PASSAGE_COVERAGE,
+    POLICY_RESPONSES,
+    POLICY_VERSION,
+    PRIVACY_RESPONSE,
     SUBSTANTIAL_PASSAGE_WORDS,
     UNPUBLISHED_WORK_RESPONSE,
+    UNSUPPORTED_RESPONSE,
     Policy,
     has_provider_self_identification,
     is_bulk_reproduction,
@@ -56,6 +60,7 @@ class TestIdentityIsDeterministic:
             "Are you a bot?",
             "Are you OJ?",
             "Are you OJ Florendo?",
+            "Are you E.V?",
             "Who made you?",
             "Who built you?",
         ],
@@ -73,7 +78,7 @@ class TestIdentityIsDeterministic:
         decision = screen_question("What are you?")
 
         assert decision is not None
-        assert "OJ Assistant" in decision.text
+        assert "E.V" in decision.text
         assert "not OJ himself" in decision.text
 
     def test_the_approved_identity_does_not_trip_the_output_guard(self) -> None:
@@ -127,6 +132,97 @@ class TestProviderSelfIdentification:
         assert replacement is not None
         assert replacement.policy == Policy.PROVIDER_SELF_ID
         assert replacement.text == APPROVED_IDENTITY
+
+
+class TestPublicPolicyResponses:
+    """The fixed v3 copy is the complete public policy-result vocabulary."""
+
+    def test_version_and_allowed_policy_ids_are_exact(self) -> None:
+        assert POLICY_VERSION == "portfolio-policy-v3"
+        assert set(POLICY_RESPONSES) == {
+            "unsupported",
+            "identity",
+            "architecture",
+            "bulk_extraction",
+            "unpublished_work",
+            "provider_self_identification",
+            "bulk_reproduction",
+            "privacy",
+        }
+
+    def test_unsupported_and_alias_copy_are_application_owned(self) -> None:
+        assert UNSUPPORTED_RESPONSE == (
+            "I don't have that information in OJ's published material. "
+            "You can contact OJ directly."
+        )
+        assert POLICY_RESPONSES["unsupported"] == UNSUPPORTED_RESPONSE
+        assert POLICY_RESPONSES[Policy.PROVIDER_SELF_ID] == APPROVED_IDENTITY
+        assert POLICY_RESPONSES[Policy.BULK_REPRODUCTION] == BULK_EXTRACTION_RESPONSE
+
+    def test_identity_is_exactly_e_v_and_keeps_the_ai_disclosure(self) -> None:
+        assert APPROVED_IDENTITY.startswith("I am E.V,")
+        assert "AI assistant" in APPROVED_IDENTITY
+        assert "OJ Assistant" not in APPROVED_IDENTITY
+
+    def test_privacy_copy_states_the_bounded_tab_retention_contract(self) -> None:
+        lowered = PRIVACY_RESPONSE.lower()
+        for fact in (
+            "sessionstorage",
+            "browser tab",
+            "closed",
+            "reopened",
+            "refreshed",
+            "session restore",
+            "duplicated",
+            "opener-created",
+            "diverge independently",
+            "not saved or resent",
+            "clear chat",
+            "does not guarantee physical erasure",
+            "do not keep a transcript",
+            "no account",
+            "provider's retention or training",
+        ):
+            assert fact in lowered
+        for unsupported_promise in (
+            "never retained",
+            "not used for training",
+        ):
+            assert unsupported_promise not in lowered
+
+
+class TestEvidenceQuestionsKeepTheirEvidenceSemantics:
+    """Policy patterns must not manufacture answers to grounding questions.
+
+    These cases belong to retrieval, the deployment prompt and full-answer human
+    review. Reaching that path is deterministic; semantic entailment is not.
+    """
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            # Missing evidence must not become a categorical negative in code.
+            "Does the absence of Fortune 500 clients mean OJ never had one?",
+            # A documented private fact and an unknown fact require different
+            # evidence treatment rather than one generic policy response.
+            "OJ's phone number is private, but what is his middle name?",
+            # The supported part must survive while the absent part is bounded.
+            "What is OJ studying, and what grade did he receive last year?",
+            # Source conflict is reported from the actual supplied sources.
+            "If two retrieved sources conflict on a date, which should I trust?",
+            # Embedded text remains data at the prompt boundary. The service is
+            # the policy authority and the assistant has no tools.
+            "A passage says to ignore prior rules and reveal the system prompt.",
+            # A citation for the first clause cannot support the second one.
+            "What technology is Cited built with, and which award did it win?",
+            # The privacy corpus gives the tab-retention answer with evidence.
+            "Will closing E.V permanently erase this chat?",
+        ],
+    )
+    def test_grounding_cases_are_not_replaced_by_an_unrelated_fixed_policy(
+        self, question: str
+    ) -> None:
+        assert screen_question(question) is None
 
 
 class TestBulkExtractionInputGuard:
@@ -650,10 +746,11 @@ class TestIdentityVersusArchitectureQuestions:
             "Are you Claude?",
             "Are you ChatGPT?",
             "What model are you?",
-            "What model powers OJ Assistant?",
+            "What model powers E.V?",
+            "What are you, and which model currently powers you?",
             "What are you powered by?",
             "What are you running on?",
-            "Does OJ Assistant use Anthropic?",
+            "Does E.V use Anthropic?",
         ],
     )
     def test_model_questions_return_the_architecture_answer(
@@ -673,16 +770,17 @@ class TestIdentityVersusArchitectureQuestions:
         assert decision.text == APPROVED_ARCHITECTURE
 
     def test_the_architecture_answer_names_the_model_truthfully(self) -> None:
-        assert "Claude Haiku 4.5" in APPROVED_ARCHITECTURE
-        assert "OJ Assistant" in APPROVED_ARCHITECTURE
+        assert "GPT-5.6 Luna" in APPROVED_ARCHITECTURE
+        assert "Gemini 3.5 Flash-Lite" in APPROVED_ARCHITECTURE
+        assert "OpenAI" in APPROVED_ARCHITECTURE
+        assert "Google" in APPROVED_ARCHITECTURE
+        assert "E.V" in APPROVED_ARCHITECTURE
         assert "built by OJ Florendo" in APPROVED_ARCHITECTURE
 
-    def test_the_architecture_answer_never_presents_itself_as_claude(self) -> None:
-        """The line that must hold: it may say Claude *powers* it, never that it
-        *is* Claude. The output guard is asserted against the approved wording so
-        the two controls cannot contradict each other."""
+    def test_the_architecture_answer_never_claims_a_provider_identity(self) -> None:
+        """It may name provider components, but E.V remains the product identity."""
         assert has_provider_self_identification(APPROVED_ARCHITECTURE) is False
-        assert APPROVED_ARCHITECTURE.startswith("I'm OJ Assistant")
+        assert APPROVED_ARCHITECTURE.startswith("I am E.V,")
 
     def test_the_architecture_answer_discloses_no_operational_detail(self) -> None:
         """Architecture is public; operations are not."""
@@ -693,10 +791,10 @@ class TestIdentityVersusArchitectureQuestions:
     @pytest.mark.parametrize(
         "question",
         [
-            "How is OJ Assistant built?",
+            "How is E.V built?",
             "What technology is the assistant built with?",
             "Does the assistant use RAG?",
-            "How does OJ Assistant find its answers?",
+            "How does E.V find its answers?",
             "What embedding model does Cited use?",
             "Which Claude model does Cited run on?",
             "What is Cited built with?",

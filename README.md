@@ -3,8 +3,16 @@
 Ask a question about a set of documents. Get an answer **with the exact passage
 it came from** — or an honest "that isn't covered in these documents."
 
-Every claim about quality below is reproducible with one command:
-`doc-assistant eval`.
+The local E.V candidate uses Gemini 3.5 Flash-Lite as primary and GPT-5.6 Luna
+as an availability backup. It is **untested and not activated**. The owner stopped
+further tests and model comparisons; no latency or answer-quality advantage is
+claimed. See [ADR-0008](docs/adr/0008-luna-gemini-fallback.md) and
+[the v3 runtime contract](docs/runbooks/assistant-runtime-v3.md).
+
+Quality results and paid-evaluation examples below describe the historical
+single-provider demo. They do not qualify this migration. The legacy live
+`eval --paid` path is disabled before provider dispatch; offline historical
+review remains separate. Retrieval-only evaluation does not prove answer quality.
 
 ---
 
@@ -37,10 +45,10 @@ returns the answer, and shows you where it came from so you can check it.
 
 Most demos of this kind answer confidently whether or not they should.
 
-**It cites its sources, and the citations are verified.** Citations come from
-the Anthropic API's native citations feature, computed against the documents
-actually supplied — not from asking a model to "include the source" and hoping.
-Then every quote is checked again here, against the passage we sent. A quote
+**It cites its sources, and the citations are verified.** Both providers return
+the same small structured citation contract against the passages actually
+supplied. Every generated quote is resolved to that request's evidence ID and
+checked again here, against the passage we sent. A quote
 that does not appear in it is discarded and counted. That check has never
 fired, which is the point: it is how we would know if it stopped being true.
 
@@ -54,6 +62,13 @@ command, with the failing cases printed.
 ---
 
 ## Results
+
+These are historical measurements from August 2026 under the original scoring
+rules. They do not establish current factual correctness. [Evaluation v3](docs/test-plans/evaluation-v3.md)
+now requires complete claim review and failing release gates; citation presence
+alone cannot pass. No v3 paid-quality pass is claimed here. Reproducible setup
+and release verification are documented in [builds](docs/runbooks/builds.md) and
+[release evidence](docs/runbooks/release-evidence.md).
 
 From `doc-assistant eval` on the committed question set (15 questions,
 10 answerable, 5 not) against the demo corpus:
@@ -93,9 +108,9 @@ Reasoning for each significant choice lives in [`docs/adr/`](docs/adr/).
 | Embedding location | Local, not a hosted API | No per-query cost on the retrieval path, no second vendor |
 | Retrieval | numpy cosine similarity behind a `Retriever` interface | At this corpus size a vector database is complexity without benefit; the interface keeps the upgrade cheap |
 | Query encoding | `bge` instruction prefix applied by hand | `fastembed`'s `query_embed()` is byte-identical to `embed()`, so it applies no prefix at all. Adding it measurably improved top-1 |
-| Citations | Claude's native citations, then verified locally | The API cannot cite text it was not sent; the local check means the guarantee lives in this repository rather than in a vendor's feature list |
+| Citations | Shared structured contract, verified locally | Both providers receive the same retrieved evidence; exact quote containment is enforced here |
 | Refusal | The model judges the retrieved passages | **Not** a similarity threshold — that was the plan until it was measured. [ADR-0002](docs/adr/0002-refusal-is-a-judgement-not-a-threshold.md) |
-| Answering model | Claude Haiku 4.5 | Reading four short passages is comprehension, not reasoning. $2.20 per 1,000 questions against $11.00 for the largest model |
+| Answering models | Gemini 3.5 Flash-Lite primary; GPT-5.6 Luna fallback | Serial fallback is limited to a classified primary availability failure |
 
 ### The measurement that changed the design
 
@@ -125,7 +140,8 @@ pre-filter for the obviously unrelated (*"what is the capital of France?"* score
 ```bash
 python -m venv .venv
 .venv\Scripts\activate            # Windows; use source .venv/bin/activate elsewhere
-pip install -e ".[api,dev]"
+python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock -r requirements-build.lock
+python -m pip install --no-deps --no-build-isolation -e .
 ```
 
 On Windows, that one-time setup enables a one-click start: double-click
@@ -160,15 +176,19 @@ upload, edit or delete route. See the
 [local inspector runbook](docs/runbooks/corpus-inspector.md) and the
 [instructor demonstration guide](docs/runbooks/instructor-demonstration.md).
 
-For answering, copy `.env.example` to `.env` and add an Anthropic key:
+For answering, copy `.env.example` to `.env` and configure both approved
+provider accounts. Answering stays disabled unless both configurations are
+complete and fallback is explicitly enabled:
 
 ```bash
 doc-assistant ask "What are the four components of a well-formed prompt?"
 doc-assistant eval --paid --max-paid-calls 15 --reason "owner-approved review"
 ```
 
-The second command makes provider calls; `--paid` and a hard call ceiling are
-deliberately required. Plain `doc-assistant eval` remains retrieval-only.
+The live multi-provider evaluation path is temporarily fail-closed while its
+per-provider evidence and cost format is reviewed. Plain `doc-assistant eval`
+remains retrieval-only. `doc-assistant ask` can make up to two serial attempts:
+one primary and one fallback after a classified availability failure.
 
 Then the web service:
 
@@ -203,7 +223,7 @@ which is what keeps a different deployment a wrapper rather than a rewrite.
 Read [SECURITY.md](SECURITY.md) first. Two controls are **not optional** and are
 not enforced by this code:
 
-1. **A hard spend cap on the API account.** The service has its own daily
+1. **Hard spend caps on both API accounts.** The service has its own daily
    ceiling, but that counter resets when the process restarts. Only the
    provider's cap bounds the loss when something loops.
 2. **Rate limiting at the edge**, in addition to the application's own.

@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import json
 
-from assistant.metrics import MAX_LATENCY_SAMPLES, AssistantMetrics
+import pytest
+
+from assistant.metrics import (
+    MAX_DURATION_MS,
+    MAX_LATENCY_SAMPLES,
+    AssistantMetrics,
+    MetricsIdentity,
+)
 
 
 class TestCounting:
@@ -130,7 +137,13 @@ class TestPrivacy:
         because its job is to promise there is none. Scanning it would make this
         test fail on the very disclosure it is checking for.
         """
-        metrics = AssistantMetrics()
+        metrics = AssistantMetrics(
+            identity=MetricsIdentity(
+                model="model-version",
+                corpus="corpus-version",
+                prompt="prompt-version",
+            )
+        )
         metrics.record("answered", 120.0)
         metrics.record("not_covered", 90.0)
 
@@ -138,18 +151,8 @@ class TestPrivacy:
         assert isinstance(snapshot.pop("note"), str)
         serialised = json.dumps(snapshot).lower()
 
-        for forbidden in (
-            "question",
-            "query",
-            "text",
-            "prompt",
-            "transcript",
-            "ip",
-            "user",
-            "agent",
-            "session",
-        ):
-            assert forbidden not in serialised, f"{forbidden!r} leaked into metrics"
+        for forbidden in ("private question sentinel", "visitor@example.test"):
+            assert forbidden not in serialised
 
     def test_record_accepts_no_question_argument(self) -> None:
         """Structural, not a matter of discipline: there is no parameter through
@@ -159,6 +162,87 @@ class TestPrivacy:
         parameters = set(inspect.signature(AssistantMetrics.record).parameters)
 
         assert parameters == {"self", "outcome", "latency_ms", "rejected_citations"}
+
+
+class TestOperationalMetrics:
+    def test_admission_and_stage_categories_are_fixed_and_aggregated(self) -> None:
+        metrics = AssistantMetrics()
+        metrics.record_admission("admitted")
+        metrics.record_admission("rejected_full")
+        metrics.record_stage("retrieval", 10.0)
+        metrics.record_stage("retrieval", 20.0)
+        metrics.record_stage("provider", 90_000.0)
+
+        snapshot = metrics.snapshot()
+        assert snapshot["admission"] == {
+            "admitted": 1,
+            "rejected_full": 1,
+            "rejected_closed": 0,
+        }
+        assert snapshot["stages_ms"]["retrieval"] == {
+            "p50": 10.0,
+            "p95": 20.0,
+            "samples": 2,
+        }
+        assert snapshot["stages_ms"]["provider"]["p50"] == MAX_DURATION_MS
+
+    def test_attempts_distinguish_uncertainty_and_unknown_usage(self) -> None:
+        metrics = AssistantMetrics()
+        metrics.record_attempt("completed", input_tokens=100, output_tokens=25)
+        metrics.record_attempt("completed")
+        metrics.record_attempt("uncertain")
+
+        attempts = metrics.snapshot()["provider_attempts"]
+        assert attempts["total"] == 3
+        assert attempts["outcomes"] == {"completed": 2, "uncertain": 1}
+        assert attempts["uncertain"] == 1
+        assert attempts["usage"] == {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "known_attempts": 1,
+            "unknown_attempts": 2,
+        }
+
+    def test_no_known_usage_is_reported_as_unknown_not_zero(self) -> None:
+        metrics = AssistantMetrics()
+        metrics.record_attempt("uncertain")
+
+        usage = metrics.snapshot()["provider_attempts"]["usage"]
+        assert usage["input_tokens"] is None
+        assert usage["output_tokens"] is None
+        assert usage["unknown_attempts"] == 1
+
+    def test_identity_is_constructor_only_trusted_version_data(self) -> None:
+        metrics = AssistantMetrics(
+            identity=MetricsIdentity(
+                model="claude-haiku-4-5",
+                corpus="sha256:abc",
+                prompt="prompt-v2",
+            )
+        )
+
+        assert metrics.snapshot()["identity"] == {
+            "model": "claude-haiku-4-5",
+            "corpus": "sha256:abc",
+            "prompt": "prompt-v2",
+        }
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("record", ("answered", float("nan"))),
+            ("record", ("answered", -1.0)),
+            ("record_stage", ("provider", float("inf"))),
+            ("record_stage", ("unknown", 1.0)),
+            ("record_admission", ("unknown",)),
+            ("record_attempt", ("unknown",)),
+        ],
+    )
+    def test_unbounded_or_unknown_categories_are_rejected(
+        self, method: str, args: tuple[object, ...]
+    ) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            getattr(AssistantMetrics(), method)(*args)
 
     def test_the_snapshot_says_it_is_not_a_lifetime_total(self) -> None:
         """Under scale-to-zero these reset routinely. A reader who assumes

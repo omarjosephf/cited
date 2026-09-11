@@ -316,10 +316,8 @@ class TestModelCacheLocation:
             encoding="utf-8"
         )
         assert "EMBEDDING_CACHE_DIR=/opt/models" in dockerfile
-        assert "cache_dir='/opt/models'" in dockerfile, (
-            "the build stage must pass cache_dir explicitly: fastembed reads no "
-            "environment variable of its own"
-        )
+        assert "python scripts/prepare_model.py --cache-dir /opt/models" in dockerfile
+        assert "HF_HUB_OFFLINE=1" in dockerfile
 
 
 def test_the_heading_is_part_of_what_gets_embedded() -> None:

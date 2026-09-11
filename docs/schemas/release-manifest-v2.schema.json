@@ -1,0 +1,427 @@
+{
+  "$defs": {
+    "AnswerConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "primary_model": {
+          "const": "gemini-3.5-flash-lite",
+          "title": "Primary Model",
+          "type": "string"
+        },
+        "fallback_model": {
+          "const": "gpt-5.6-luna",
+          "title": "Fallback Model",
+          "type": "string"
+        },
+        "answer_effort": {
+          "const": "none",
+          "title": "Answer Effort",
+          "type": "string"
+        },
+        "answer_max_tokens": {
+          "const": 1024,
+          "title": "Answer Max Tokens",
+          "type": "integer"
+        },
+        "top_k": {
+          "const": 4,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "prefilter_score": {
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "title": "Prefilter Score",
+          "type": "number"
+        },
+        "backend_timeout_seconds": {
+          "maximum": 8.0,
+          "minimum": 8.0,
+          "title": "Backend Timeout Seconds",
+          "type": "number"
+        },
+        "provider_timeout_seconds": {
+          "maximum": 6.0,
+          "minimum": 6.0,
+          "title": "Provider Timeout Seconds",
+          "type": "number"
+        },
+        "primary_timeout_seconds": {
+          "maximum": 3.0,
+          "minimum": 3.0,
+          "title": "Primary Timeout Seconds",
+          "type": "number"
+        },
+        "validation_margin_seconds": {
+          "maximum": 0.5,
+          "minimum": 0.5,
+          "title": "Validation Margin Seconds",
+          "type": "number"
+        },
+        "wire_version": {
+          "const": 3,
+          "title": "Wire Version",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "const": 2,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "retries": {
+          "const": 0,
+          "title": "Retries",
+          "type": "integer"
+        },
+        "fallback_mode": {
+          "const": "availability_only",
+          "title": "Fallback Mode",
+          "type": "string"
+        },
+        "complete_pair_required": {
+          "const": true,
+          "title": "Complete Pair Required",
+          "type": "boolean"
+        },
+        "max_provider_request_bytes": {
+          "const": 32000,
+          "title": "Max Provider Request Bytes",
+          "type": "integer"
+        },
+        "attempt_reservation_micro_usd": {
+          "const": 40000,
+          "title": "Attempt Reservation Micro Usd",
+          "type": "integer"
+        },
+        "daily_attempt_limit": {
+          "maximum": 40,
+          "minimum": 1,
+          "title": "Daily Attempt Limit",
+          "type": "integer"
+        },
+        "monthly_attempt_limit": {
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Monthly Attempt Limit",
+          "type": "integer"
+        },
+        "daily_budget_micro_usd": {
+          "maximum": 400000,
+          "minimum": 1,
+          "title": "Daily Budget Micro Usd",
+          "type": "integer"
+        },
+        "monthly_budget_micro_usd": {
+          "maximum": 2000000,
+          "minimum": 1,
+          "title": "Monthly Budget Micro Usd",
+          "type": "integer"
+        },
+        "shared_worker_limit": {
+          "const": 1,
+          "title": "Shared Worker Limit",
+          "type": "integer"
+        },
+        "budget_storage": {
+          "const": "persistent_local_sqlite",
+          "title": "Budget Storage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "primary_model",
+        "fallback_model",
+        "answer_effort",
+        "answer_max_tokens",
+        "top_k",
+        "prefilter_score",
+        "backend_timeout_seconds",
+        "provider_timeout_seconds",
+        "primary_timeout_seconds",
+        "validation_margin_seconds",
+        "wire_version",
+        "max_attempts",
+        "retries",
+        "fallback_mode",
+        "complete_pair_required",
+        "max_provider_request_bytes",
+        "attempt_reservation_micro_usd",
+        "daily_attempt_limit",
+        "monthly_attempt_limit",
+        "daily_budget_micro_usd",
+        "monthly_budget_micro_usd",
+        "shared_worker_limit",
+        "budget_storage"
+      ],
+      "title": "AnswerConfiguration",
+      "type": "object"
+    },
+    "AnswerRuntimeArtifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "capture.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "cli.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "api.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "answer_event.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "answering.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "provider_adapters.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "provider_boundary.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "provider_router.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "runtime.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "budget.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "persistent_budget.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "settings.py": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "transport.py": {
+          "$ref": "#/$defs/Artifact"
+        }
+      },
+      "required": [
+        "capture.py",
+        "cli.py",
+        "api.py",
+        "answer_event.py",
+        "answering.py",
+        "provider_adapters.py",
+        "provider_boundary.py",
+        "provider_router.py",
+        "runtime.py",
+        "budget.py",
+        "persistent_budget.py",
+        "settings.py",
+        "transport.py"
+      ],
+      "title": "AnswerRuntimeArtifacts",
+      "type": "object"
+    },
+    "Artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "title": "Artifact",
+      "type": "object"
+    },
+    "EmbeddingIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "const": "BAAI/bge-small-en-v1.5",
+          "title": "Model",
+          "type": "string"
+        },
+        "dimensions": {
+          "const": 384,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "model_lock": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "vectors": {
+          "$ref": "#/$defs/Artifact"
+        }
+      },
+      "required": [
+        "model",
+        "dimensions",
+        "model_lock",
+        "vectors"
+      ],
+      "title": "EmbeddingIdentity",
+      "type": "object"
+    },
+    "EvaluationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "suite": {
+          "enum": [
+            "demo",
+            "portfolio"
+          ],
+          "title": "Suite",
+          "type": "string"
+        },
+        "corpus_path": {
+          "title": "Corpus Path",
+          "type": "string"
+        },
+        "corpus_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Corpus Sha256",
+          "type": "string"
+        },
+        "questions": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "prompt": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "run": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "review": {
+          "$ref": "#/$defs/Artifact"
+        }
+      },
+      "required": [
+        "suite",
+        "corpus_path",
+        "corpus_sha256",
+        "questions",
+        "prompt",
+        "run",
+        "review"
+      ],
+      "title": "EvaluationEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "deployment": {
+      "enum": [
+        "oj-assistant",
+        "cited-demo"
+      ],
+      "title": "Deployment",
+      "type": "string"
+    },
+    "frontend_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Frontend Commit",
+      "type": "string"
+    },
+    "backend_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Backend Commit",
+      "type": "string"
+    },
+    "backend_image": {
+      "pattern": "^[^\\s]+@sha256:[0-9a-f]{64}$",
+      "title": "Backend Image",
+      "type": "string"
+    },
+    "python_base": {
+      "pattern": "^python:3\\.12[^\\s]*@sha256:[0-9a-f]{64}$",
+      "title": "Python Base",
+      "type": "string"
+    },
+    "runtime_lock": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "review_code": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "policy": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "corpus_path": {
+      "title": "Corpus Path",
+      "type": "string"
+    },
+    "corpus_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Corpus Sha256",
+      "type": "string"
+    },
+    "prompt": {
+      "$ref": "#/$defs/Artifact"
+    },
+    "embedding": {
+      "$ref": "#/$defs/EmbeddingIdentity"
+    },
+    "spec_version": {
+      "const": "3.0",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "answer_contract_version": {
+      "const": 3,
+      "title": "Answer Contract Version",
+      "type": "integer"
+    },
+    "answer_runtime": {
+      "$ref": "#/$defs/AnswerRuntimeArtifacts"
+    },
+    "answer_configuration": {
+      "$ref": "#/$defs/AnswerConfiguration"
+    },
+    "evaluations": {
+      "items": {
+        "$ref": "#/$defs/EvaluationEvidence"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "title": "Evaluations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "deployment",
+    "frontend_commit",
+    "backend_commit",
+    "backend_image",
+    "python_base",
+    "runtime_lock",
+    "evaluator",
+    "review_code",
+    "policy",
+    "corpus_path",
+    "corpus_sha256",
+    "prompt",
+    "embedding",
+    "spec_version",
+    "answer_contract_version",
+    "answer_runtime",
+    "answer_configuration",
+    "evaluations"
+  ],
+  "title": "ReleaseManifest",
+  "type": "object"
+}

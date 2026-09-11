@@ -31,6 +31,7 @@ REPO = Path(__file__).resolve().parents[1]
 # "something secret-looking" keeps false positives at zero, which is what keeps
 # the test trusted.
 SECRET_PATTERNS = {
+    "Google API key": re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
     "Anthropic API key": re.compile(r"sk-ant-[a-z0-9]+-[A-Za-z0-9_\-]{20,}"),
     "OpenAI API key": re.compile(r"sk-proj-[A-Za-z0-9_\-]{20,}"),
     "GitHub token": re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),

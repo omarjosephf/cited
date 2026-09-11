@@ -127,3 +127,14 @@ at a local setup instead.
 
 The `master` branch is the only supported version. This is a project in active
 development, not a release-managed product; fixes land there and nowhere else.
+
+
+## Durable E.V candidate
+
+The Gemini-primary/Luna-fallback candidate is governed by ADR-0009. Paid service
+and CLI answering require persistent accounting; qualification also requires a
+non-renewing carried-forward allowance. Unknown calls keep their reservations.
+See [trust boundaries](docs/threat-models/durable-answering.md) and
+[operations](docs/runbooks/durable-budget.md) for the single-Machine, mounted-volume
+requirements and remaining pricing/activation qualification. This source change
+is not a production deployment or a guarantee of provider invoice totals.

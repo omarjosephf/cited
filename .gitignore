@@ -11,6 +11,7 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ci/
 .coverage
 htmlcov/
 
@@ -26,6 +27,16 @@ htmlcov/
 
 # Evaluation output — the question set is committed, the run results are not.
 eval/results/
+
+# Private/local AI-tooling instructions and state. The public repository tracks
+# its own guidance at the root; per-machine agent config and transcripts never
+# belong in it. Listed per tool deliberately, so a new assistant's directory is
+# added here rather than published by an incautious `git add -A`.
+/CLAUDE.local.md
+/AGENTS.local.md
+/.claude/
+/.agents/
+/.codex/
 
 # OS / editor
 .DS_Store

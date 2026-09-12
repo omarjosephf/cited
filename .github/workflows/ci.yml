@@ -98,6 +98,22 @@ jobs:
       - name: Portfolio retrieval gate
         run: HF_HUB_OFFLINE=1 doc-assistant --corpus deploy/oj-assistant/content eval --suite portfolio --questions .ci/portfolio/content/assistant-eval/questions.toml --output eval/results/portfolio-retrieval.json
 
+      # These files carry the per-question ranks behind the headline hit rate.
+      # They were written on every run and then discarded with the runner, which
+      # is how a published "98% hit rate" ended up with no evidence anyone could
+      # check. `always()` matters more than the happy path: a failing gate is the
+      # run whose detail you actually need, and it is the one that used to
+      # vanish. Retention is GitHub's default, so this is a debugging aid, not
+      # the durable record -- that is the committed evidence file in the
+      # portfolio repository, which a test holds to the current corpus.
+      - name: Keep the retrieval evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retrieval-evidence
+          path: eval/results/*.json
+          if-no-files-found: warn
+
       - name: Build default container without provider credentials
         run: docker build --build-arg BACKEND_COMMIT="$GITHUB_SHA" --tag cited:ci .
 

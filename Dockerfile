@@ -13,7 +13,12 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 # The build backend is pinned separately and never resolves extra dependencies.
 COPY requirements-runtime.lock requirements-build.lock ./
 RUN python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock \
-    && python -m pip install --require-hashes --only-binary=:all: --prefix=/install -r requirements-runtime.lock
+    # --ignore-installed is load-bearing. The build lock above installs into this
+    # stage's system site-packages, and without it pip treats any package present
+    # in BOTH locks as already satisfied and never writes it to /install - which is
+    # the only thing the runtime stage copies. `packaging` is in both, so the
+    # runtime image shipped without it and crash-looped on `import limits`.
+    && python -m pip install --require-hashes --only-binary=:all: --ignore-installed --prefix=/install -r requirements-runtime.lock
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 RUN python -m pip install --no-deps --no-build-isolation --prefix=/install .

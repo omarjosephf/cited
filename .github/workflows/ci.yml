@@ -101,6 +101,11 @@ jobs:
       - name: Build default container without provider credentials
         run: docker build --build-arg BACKEND_COMMIT="$GITHUB_SHA" --tag cited:ci .
 
+      # Building is not running. A missing runtime dependency builds perfectly and
+      # then crash-loops on first import, which is how a broken image reached Fly.
+      - name: Container actually starts and imports the app
+        run: docker run --rm cited:ci python -c "import assistant.api"
+
   # Deliberately a separate job. A secret reaching a tracked file is not a test
   # failure like any other — it is the one failure that cannot be undone by
   # fixing the next commit, because the credential must then be treated as

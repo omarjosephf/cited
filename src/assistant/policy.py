@@ -148,11 +148,18 @@ _ARCHITECTURE_REQUEST = (
     # "Are you Claude?" — asked of the assistant, so it is really about what
     # powers it rather than about what it is.
     re.compile(r"\bare\s+you\s+(?:claude|chatgpt|gpt|gemini|llama)\b", re.I),
-    re.compile(r"\bwhat\s+(?:model|llm)\s+are\s+you\b", re.I),
+    re.compile(r"\bwhat\s+(?:models?|llms?)\s+are\s+you\b", re.I),
     # "What model powers E.V / this assistant / you"
     re.compile(
-        r"\b(?:what|which)\s+(?:ai\s+)?(?:model|llm)\b[^.?!]{0,40}?"
-        r"\b(?:powers?|runs?|drives?|behind|uses?)\b",
+        r"\b(?:what|which)\s+(?:ai\s+)?(?:models?|llms?)\b[^.?!]{0,40}?"
+        r"\b(?:powers?|runs?|drives?|behind|use|uses|using)\b",
+        re.I,
+    ),
+    # "What is your model / What are your AI models". The possessive names the
+    # assistant as plainly as "powers you" does, and asking it in the plural is
+    # at least as natural as the singular.
+    re.compile(
+        r"\bwhat\s+(?:is|are)\s+your\s+(?:ai\s+)?(?:models?|llms?)\b",
         re.I,
     ),
     re.compile(r"\bwhat\s+(?:are\s+you\s+)?(?:powered|running)\s+(?:by|on)\b", re.I),
@@ -174,6 +181,19 @@ citation verification does, what `cited` is built with, which model `cited` runs
 — reach the corpus, which answers them properly and at more length than a fixed
 string could. This group covers only the short, direct questions a visitor asks
 *of the assistant itself*.
+"""
+
+_NAMES_ANOTHER_PRODUCT = re.compile(r"\bcited\b", re.I)
+"""A question that names one of OJ's projects is about *that project*.
+
+The architecture rule answers for E.V and only for E.V. "What AI model does
+Cited use?" was reaching it and being answered with E.V's Gemini/Luna
+configuration — a confident, wrong answer about a different product, and one no
+test caught. The corpus documents Cited properly, including that its original
+demo ran on Claude Haiku 4.5, so these belong there.
+
+This also lets the patterns above cover the plural and the -ing form without
+widening into the projects, which is why it is checked first.
 """
 
 _IDENTITY_REQUEST = (
@@ -242,7 +262,9 @@ def screen_question(question: str) -> PolicyResponse | None:
     # answer is the better one. Replying with the product identity alone would
     # be true but evasive, which is the impression this project can least
     # afford with a technical reader.
-    if any(pattern.search(text) for pattern in _ARCHITECTURE_REQUEST):
+    if not _NAMES_ANOTHER_PRODUCT.search(text) and any(
+        pattern.search(text) for pattern in _ARCHITECTURE_REQUEST
+    ):
         return PolicyResponse(Policy.ARCHITECTURE, APPROVED_ARCHITECTURE)
 
     if any(pattern.search(text) for pattern in _IDENTITY_REQUEST):

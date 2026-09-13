@@ -751,6 +751,16 @@ class TestIdentityVersusArchitectureQuestions:
             "What are you powered by?",
             "What are you running on?",
             "Does E.V use Anthropic?",
+            # Asked of the live assistant on 12 September and answered from the
+            # corpus instead, which described Cited's Claude Haiku 4.5 stack and
+            # read as though E.V ran on it. The rule had the right answer ready
+            # and never fired: the patterns were singular-only, so "models"
+            # could not match, and "uses?" did not cover "using".
+            "What is your AI Models?",
+            "What AI model are you using for E.V Smart Assistant?",
+            "What are your models?",
+            "What is your model?",
+            "Which AI models do you use?",
         ],
     )
     def test_model_questions_return_the_architecture_answer(
@@ -798,6 +808,13 @@ class TestIdentityVersusArchitectureQuestions:
             "What embedding model does Cited use?",
             "Which Claude model does Cited run on?",
             "What is Cited built with?",
+            # These reached the architecture rule and were answered with E.V's
+            # Gemini/Luna configuration: a confident, wrong answer about a
+            # different product. Widening the patterns for the plural and the
+            # -ing form would have widened this too, so naming a project now
+            # sends the question to the corpus before the patterns are tried.
+            "What AI model does Cited use?",
+            "What AI models is Cited using?",
         ],
     )
     def test_architecture_questions_reach_the_corpus(self, question: str) -> None:

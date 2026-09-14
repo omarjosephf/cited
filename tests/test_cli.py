@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from assistant import cli
-from assistant.release_manifest import ANSWER_RUNTIME_SOURCES
+from assistant.release_manifest import ANSWER_RUNTIME_SOURCES, AnswerConfiguration
 from assistant.settings import Settings
 
 
@@ -299,6 +299,40 @@ class TestEvalIsFreeUnlessPaidIsRequested:
         assert all(
             len(value) == 64 for value in captured["answer_runtime_sha256"].values()
         )
+        # The record that used to exist only past the confirmation prompt.
+        assert AnswerConfiguration.model_validate(captured["config"])
+
+    def test_the_free_path_records_the_identity_the_paid_path_will_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The capture envelope must not reach the evidence identity.
+
+        `PersistentBudget` pins the capture's settings to its ledger's stamped
+        limits, so a capture against the 150-attempt ledger runs with these
+        values set. If any of them still reached `AnswerConfiguration`, the
+        free rehearsal and the paid capture would record different identities
+        and only the paid one would ever find out.
+        """
+        bare = Settings(_env_file=None, retrieval_top_k=4)  # type: ignore[call-arg]
+        live = cli._answer_configuration(bare, 4)
+
+        for name, value in (
+            ("DAILY_ANSWER_LIMIT", "150"),
+            ("MONTHLY_ANSWER_LIMIT", "150"),
+            ("DAILY_BUDGET_MICRO_USD", "6000000"),
+            ("MONTHLY_BUDGET_MICRO_USD", "6000000"),
+        ):
+            monkeypatch.setenv(name, value)
+        widened = Settings(_env_file=None, retrieval_top_k=4)  # type: ignore[call-arg]
+        capture = cli._answer_configuration(widened, 4)
+
+        assert capture == live
+        assert not {
+            "daily_attempt_limit",
+            "monthly_attempt_limit",
+            "daily_budget_micro_usd",
+            "monthly_budget_micro_usd",
+        } & set(capture)
 
     def test_answer_configuration_records_the_routed_behavior(self) -> None:
         settings = Settings.model_construct(
@@ -331,10 +365,6 @@ class TestEvalIsFreeUnlessPaidIsRequested:
             "complete_pair_required": True,
             "max_provider_request_bytes": 32000,
             "attempt_reservation_micro_usd": 40000,
-            "daily_attempt_limit": 40,
-            "monthly_attempt_limit": 200,
-            "daily_budget_micro_usd": 400000,
-            "monthly_budget_micro_usd": 2000000,
             "shared_worker_limit": 1,
             "budget_storage": "persistent_local_sqlite",
         }

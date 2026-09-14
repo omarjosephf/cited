@@ -68,15 +68,11 @@ def release(tmp_path: Path) -> tuple[dict[str, Any], Path]:
         "complete_pair_required": True,
         "max_provider_request_bytes": 32000,
         "attempt_reservation_micro_usd": 40000,
-        "daily_attempt_limit": 40,
-        "monthly_attempt_limit": 200,
-        "daily_budget_micro_usd": 400000,
-        "monthly_budget_micro_usd": 2000000,
         "shared_worker_limit": 1,
         "budget_storage": "persistent_local_sqlite",
     }
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "deployment": "oj-assistant",
         "frontend_commit": "a" * 40,
         "backend_commit": "b" * 40,
@@ -281,20 +277,39 @@ def test_captured_answer_contract_must_match_candidate(
         verify_manifest(ReleaseManifest.model_validate(manifest), root)
 
 
-def test_v1_manifest_is_historical_and_cannot_qualify(
-    release: tuple[dict[str, Any], Path],
+@pytest.mark.parametrize("superseded", [1, 2])
+def test_superseded_manifest_versions_are_historical_and_cannot_qualify(
+    release: tuple[dict[str, Any], Path], superseded: int
 ) -> None:
+    """A version is only worth stamping if it discriminates.
+
+    v3 removed four required fields from `answer_configuration`, which breaks
+    in both directions: a v2 document is invalid against v3 and a v3 document
+    is invalid against v2. Editing the published v2 in place would have left
+    two incompatible shapes both claiming `schema_version: 2`, and this test
+    -- which existed only for v1 -- would not have covered the step that
+    actually mattered.
+    """
     manifest, _ = release
-    manifest["schema_version"] = 1
+    manifest["schema_version"] = superseded
     with pytest.raises(ValueError):
         ReleaseManifest.model_validate(manifest)
 
 
-def test_checked_in_v2_schema_matches_the_verifier_model() -> None:
-    schema = Path(__file__).parents[1] / "docs/schemas/release-manifest-v2.schema.json"
+def test_checked_in_v3_schema_matches_the_verifier_model() -> None:
+    schema = Path(__file__).parents[1] / "docs/schemas/release-manifest-v3.schema.json"
     assert json.loads(schema.read_text(encoding="utf-8")) == (
         ReleaseManifest.model_json_schema()
     )
+
+
+def test_superseded_schemas_stay_on_disk_and_are_referenced_by_nothing() -> None:
+    """v1 already sits here unreferenced; v2 now joins it. Keeping the file is
+    what makes an old manifest readable; referencing it is what would make an
+    old manifest look current."""
+    schemas = Path(__file__).parents[1] / "docs/schemas"
+    for version in (1, 2):
+        assert (schemas / f"release-manifest-v{version}.schema.json").is_file()
 
 
 @pytest.mark.parametrize(

@@ -122,6 +122,33 @@ class AnswerRuntimeArtifacts(StrictModel):
 
 
 class AnswerConfiguration(StrictModel):
+    """The non-secret behavior identity an answer was produced under.
+
+    Every field here changes what comes out of the service. Daily and monthly
+    spend ceilings do not -- they govern how many answers may be asked for,
+    never what any one of them says -- and they are no longer recorded here.
+
+    They were, until 14 September 2026, when the capture-scoped ledger
+    ADR-0015 authorises made the conflation load-bearing. `PersistentBudget`
+    refuses any settings that disagree with its ledger's stamped limits, so a
+    capture run against the 150-attempt ledger can only ever record 150 and
+    US$6.00, while the deployment that evidence qualifies runs at 40 and
+    US$0.40. `verify_manifest` requires a single `answer_configuration` to
+    equal the config of every capture AND to describe the release. It cannot
+    do both while these live here.
+
+    The deployed envelope is still guarded, by a stronger check than this one
+    was: `test_operating_caps_and_worker_settings_validate_against_runtime`
+    reads the limits out of `fly.oj-assistant.toml`, the file that is actually
+    deployed, rather than out of a schema. ADR-0015 accepted that substitution
+    when it widened the settings bounds; this extends it one level up.
+
+    `attempt_reservation_micro_usd` and `shared_worker_limit` stay. Both do
+    shape answers: the reservation price is pinned by ADR-0015 and written into
+    every ledger's `CHECK` constraint, and the worker limit is the concurrency
+    the runtime actually admits.
+    """
+
     primary_model: Literal["gemini-3.5-flash-lite"]
     fallback_model: Literal["gpt-5.6-luna"]
     answer_effort: Literal["none"]
@@ -139,16 +166,18 @@ class AnswerConfiguration(StrictModel):
     complete_pair_required: Literal[True]
     max_provider_request_bytes: Literal[32000]
     attempt_reservation_micro_usd: Literal[40000]
-    daily_attempt_limit: int = Field(ge=1, le=40)
-    monthly_attempt_limit: int = Field(ge=1, le=200)
-    daily_budget_micro_usd: int = Field(ge=1, le=400000)
-    monthly_budget_micro_usd: int = Field(ge=1, le=2000000)
     shared_worker_limit: Literal[1]
     budget_storage: Literal["persistent_local_sqlite"]
 
 
 class ReleaseManifest(StrictModel):
-    schema_version: Literal[2]
+    # v3 drops the four spend ceilings from `answer_configuration`; see that
+    # model. Removing required fields is breaking in both directions, so it
+    # takes a version rather than an edit to the published v2 document: a v2
+    # and a v3 manifest must never be indistinguishable by their own stamp.
+    # v1 and v2 stay on disk as history, referenced by nothing, and neither
+    # can qualify a release.
+    schema_version: Literal[3]
     deployment: Literal["oj-assistant", "cited-demo"]
     frontend_commit: Commit
     backend_commit: Commit

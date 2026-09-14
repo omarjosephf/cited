@@ -1,6 +1,6 @@
 # Release evidence and branch protection
 
-The [manifest schema](../schemas/release-manifest-v2.schema.json) defines a
+The [manifest schema](../schemas/release-manifest-v3.schema.json) defines a
 versioned release tuple: frontend/backend commits, backend image digest, Python
 base digest, dependency graph, corpus, prompt, model/tokenizer lock, vector
 artifact, evaluation/review/policy code, model settings and both corpus suites.
@@ -74,11 +74,21 @@ original meaning and cannot qualify changed bytes. No local hash record is a
 substitute for the authorized committed/image/reviewed release manifest.
 ## Routed-runtime evidence
 
-Manifest v2 binds answer contract v3, the candidate answer-runtime source hashes,
+Manifest v3 binds answer contract v3, the candidate answer-runtime source hashes,
 and the complete approved behavior configuration to both reviewed suites. Missing
 or extra runtime source roles, changed source bytes, different provider settings
-or stale answer contracts fail verification. Manifest v1 and earlier captures
+or stale answer contracts fail verification. Manifest v1, v2 and earlier captures
 remain historical evidence; they cannot qualify the Luna/Gemini candidate.
+
+v3 drops the four spend ceilings from `answer_configuration`, on 14 September
+2026. They never changed an answer, and keeping them there made one manifest
+field carry two values that cannot be equal: the capture runs against the
+capture-scoped ledger ADR-0015 authorises, so it can only record 150 attempts
+and US$6.00, while the deployment that evidence qualifies runs at 40 and
+US$0.40. The deployed envelope is asserted directly against
+`fly.oj-assistant.toml` instead, by a test that reads the file that is actually
+deployed. Superseded schemas stay on disk and are referenced by nothing, so an
+old manifest stays readable without ever looking current.
 
 Local retrieval, mocks and regenerated vectors are permitted under the owner's
 verification approval. Paid capture is opt-in and additionally requires an

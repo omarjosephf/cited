@@ -150,11 +150,22 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 4
     """How many chunks are put in front of the model."""
 
-    daily_answer_limit: int = Field(default=40, ge=1, le=40)
+    daily_answer_limit: int = Field(default=40, ge=1, le=150)
     monthly_answer_limit: int = Field(default=200, ge=1, le=200)
-    daily_budget_micro_usd: int = Field(default=400_000, ge=1, le=400_000)
-    monthly_budget_micro_usd: int = Field(default=2_000_000, ge=1, le=2_000_000)
-    """Combined API reservation limits; integer micro-USD, never invoice totals."""
+    daily_budget_micro_usd: int = Field(default=400_000, ge=1, le=6_000_000)
+    monthly_budget_micro_usd: int = Field(default=2_000_000, ge=1, le=6_000_000)
+    """Combined API reservation limits; integer micro-USD, never invoice totals.
+
+    The defaults are the live service envelope. The maxima are the
+    capture-scoped envelope ADR-0015 authorises — 150 attempts and US$6.00 —
+    which the one-off qualification capture needs and visitor traffic never
+    reaches. `monthly_answer_limit` already admits 150 and is unchanged.
+
+    Widening a bound does not set a value. Production pins its own in
+    `fly.oj-assistant.toml`, and
+    `test_operating_caps_and_worker_settings_validate_against_runtime` asserts
+    them by reading that deployed file rather than this schema.
+    """
 
     budget_path: Path | None = None
     budget_ledger_id: str = ""

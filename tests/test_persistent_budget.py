@@ -313,3 +313,69 @@ def test_malformed_dates_cannot_hide_a_reservation(
         connection.execute("UPDATE reservations SET day=?, month=?", (day, month))
     with pytest.raises(BudgetUnavailable, match="accounting"):
         first.spend()
+
+
+def test_bootstrap_defaults_keep_the_runbook_command_meaning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented command must still stamp the live service envelope."""
+    from assistant.persistent_budget import main
+
+    path = tmp_path / "budget.sqlite3"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "persistent_budget",
+            "--path",
+            str(path),
+            "--ledger-id",
+            IDENTITY,
+            "--carry-forward-attempts",
+            "0",
+        ],
+    )
+
+    main()
+
+    PersistentBudget(path, IDENTITY, BudgetLimits())
+
+
+def test_bootstrap_flags_stamp_a_capture_scoped_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without these flags the capture's service ledger cannot be created at all.
+
+    `PersistentBudget` refuses on any mismatch between the stored limits and the
+    ones it is constructed with, and the ledger may not be recreated to correct
+    them, so the limits must be settable at bootstrap.
+    """
+    from assistant.persistent_budget import main
+
+    path = tmp_path / "capture.sqlite3"
+    capture = BudgetLimits(150, 150, 6_000_000, 6_000_000)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "persistent_budget",
+            "--path",
+            str(path),
+            "--ledger-id",
+            IDENTITY,
+            "--carry-forward-attempts",
+            "0",
+            "--daily-attempts",
+            "150",
+            "--monthly-attempts",
+            "150",
+            "--daily-micro-usd",
+            "6000000",
+            "--monthly-micro-usd",
+            "6000000",
+        ],
+    )
+
+    main()
+
+    assert PersistentBudget(path, IDENTITY, capture).remaining == 150
+    with pytest.raises(BudgetUnavailable, match="budget_identity_or_limits"):
+        PersistentBudget(path, IDENTITY, BudgetLimits())

@@ -103,3 +103,41 @@ def test_primary_credentials_alone_do_not_enable_answering() -> None:
 def test_enabled_fallback_rejects_incomplete_configuration() -> None:
     with pytest.raises(ValidationError, match="Luna fallback requires"):
         settings(enable_fallback=True)
+
+
+def test_capture_envelope_is_admissible_and_defaults_stay_live() -> None:
+    """ADR-0015 widened the maxima to the capture envelope, not the defaults."""
+    live = settings()
+
+    assert (live.daily_answer_limit, live.monthly_answer_limit) == (40, 200)
+    assert (live.daily_budget_micro_usd, live.monthly_budget_micro_usd) == (
+        400_000,
+        2_000_000,
+    )
+
+    capture = settings(
+        daily_answer_limit=150,
+        monthly_answer_limit=150,
+        daily_budget_micro_usd=6_000_000,
+        monthly_budget_micro_usd=6_000_000,
+    )
+
+    assert capture.daily_answer_limit == 150
+    assert capture.daily_budget_micro_usd == 6_000_000
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("daily_answer_limit", 151),
+        ("monthly_answer_limit", 201),
+        ("daily_budget_micro_usd", 6_000_001),
+        ("monthly_budget_micro_usd", 6_000_001),
+        ("daily_answer_limit", 0),
+    ],
+)
+def test_budget_bounds_still_bind_above_the_capture_envelope(
+    field: str, value: int
+) -> None:
+    with pytest.raises(ValidationError):
+        settings(**{field: value})

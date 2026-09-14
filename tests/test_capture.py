@@ -174,3 +174,58 @@ def test_routed_estimate_uses_each_model_and_keeps_unknown_primary_unknown() -> 
         AnswerReport((replace(outcome, attempts=(unknown, fallback)),), 2).cost_usd
         is None
     )
+
+
+def test_allowance_bootstrap_creates_the_capture_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger creation is permanent, so it gets an entrypoint, not a snippet."""
+    from assistant.capture import main
+
+    path = tmp_path / "qualification.sqlite3"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "capture",
+            "--path",
+            str(path),
+            "--ledger-id",
+            IDENTITY,
+            "--ceiling-micro-usd",
+            "6000000",
+            "--carried-micro-usd",
+            "0",
+        ],
+    )
+
+    main()
+
+    assert QualificationAllowance(path, IDENTITY).remaining == 150
+
+
+def test_allowance_bootstrap_refuses_a_ceiling_given_in_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--ceiling-micro-usd 150` is US$0.00015: no attempts, and no way back."""
+    from assistant.capture import main
+
+    path = tmp_path / "qualification.sqlite3"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "capture",
+            "--path",
+            str(path),
+            "--ledger-id",
+            IDENTITY,
+            "--ceiling-micro-usd",
+            "150",
+            "--carried-micro-usd",
+            "0",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert not path.exists()

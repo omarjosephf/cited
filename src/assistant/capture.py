@@ -262,3 +262,72 @@ def capture_answers(
         return report
     finally:
         executor.shutdown(wait=True)
+
+
+def main() -> None:
+    """Bootstrap only through a deliberate operator command; never starts inference.
+
+    The allowance ledger is permanent: the runbook forbids recreating one to
+    regain authority, so a mistyped ceiling cannot be corrected afterwards.
+    Before this entrypoint existed the only way to create it was an improvised
+    snippet, which is the class of mistake that has no undo.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Initialize a new non-renewing qualification allowance ledger. "
+            "Permanent: it cannot be recreated later to regain allowance."
+        )
+    )
+    parser.add_argument("--path", type=Path, required=True)
+    parser.add_argument("--ledger-id", required=True)
+    parser.add_argument(
+        "--ceiling-micro-usd",
+        type=int,
+        required=True,
+        help=(
+            "lifetime ceiling in micro-USD, NOT a number of attempts; one "
+            f"attempt reserves {ATTEMPT_RESERVATION_MICRO_USD} micro-USD"
+        ),
+    )
+    parser.add_argument(
+        "--carried-micro-usd",
+        type=int,
+        required=True,
+        help=(
+            "reviewed prior qualification spend in micro-USD, deducted from the "
+            "ceiling; use 0 only when the prior allowance is genuinely unused"
+        ),
+    )
+    args = parser.parse_args()
+    # Both operands are money. A ceiling given in attempts by mistake reads as a
+    # few micro-USD and silently yields an unusable ledger that cannot be
+    # replaced, so refuse it here rather than at the first capture attempt.
+    attempts = (
+        args.ceiling_micro_usd - args.carried_micro_usd
+    ) // ATTEMPT_RESERVATION_MICRO_USD
+    if attempts < 1:
+        parser.error(
+            f"a ceiling of {args.ceiling_micro_usd} micro-USD less "
+            f"{args.carried_micro_usd} carried leaves room for no attempts at "
+            f"{ATTEMPT_RESERVATION_MICRO_USD} micro-USD each. Both flags are "
+            f"money, not attempt counts: 150 attempts is "
+            f"{150 * ATTEMPT_RESERVATION_MICRO_USD}. No ledger was created."
+        )
+    print(
+        f"About to create a permanent allowance ledger at {args.path}: "
+        f"ceiling {args.ceiling_micro_usd} micro-USD "
+        f"(US${args.ceiling_micro_usd / 1_000_000:.2f}), carried "
+        f"{args.carried_micro_usd} micro-USD "
+        f"(US${args.carried_micro_usd / 1_000_000:.2f}), leaving {attempts} "
+        f"attempts at {ATTEMPT_RESERVATION_MICRO_USD} micro-USD each."
+    )
+    QualificationAllowance.initialize(
+        args.path, args.ledger_id, args.ceiling_micro_usd, args.carried_micro_usd
+    )
+    print("Qualification allowance initialized. No provider request was made.")
+
+
+if __name__ == "__main__":
+    main()

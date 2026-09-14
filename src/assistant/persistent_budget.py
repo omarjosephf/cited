@@ -344,14 +344,39 @@ def main() -> None:
         required=True,
         help="reviewed prior reservations rounded up; all charged to today",
     )
+    # The limits are written into the ledger at creation and `PersistentBudget`
+    # refuses at runtime on any mismatch with the ones it is constructed with.
+    # They default to the live service envelope, so the bootstrap command in the
+    # runbook keeps its current meaning; a capture-scoped ledger must state its
+    # own, because the ledger cannot be recreated to correct them afterwards.
+    defaults = BudgetLimits()
+    for flag, value in (
+        ("--daily-attempts", defaults.daily_attempts),
+        ("--monthly-attempts", defaults.monthly_attempts),
+        ("--daily-micro-usd", defaults.daily_micro_usd),
+        ("--monthly-micro-usd", defaults.monthly_micro_usd),
+    ):
+        parser.add_argument(
+            flag,
+            type=int,
+            default=value,
+            help=f"permanently stamped into the ledger; live default {value}",
+        )
     args = parser.parse_args()
+    limits = BudgetLimits(
+        args.daily_attempts,
+        args.monthly_attempts,
+        args.daily_micro_usd,
+        args.monthly_micro_usd,
+    )
     initialize_ledger(
         args.path,
         args.ledger_id,
-        BudgetLimits(),
+        limits,
         carried_attempts=args.carry_forward_attempts,
     )
     print("Budget ledger initialized. No provider request was made.")
+    print(f"Permanent limits: {limits.encoded()}")
 
 
 if __name__ == "__main__":

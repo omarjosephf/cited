@@ -215,8 +215,47 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print("Answering")
         print("  skipped: --paid was not given, so no provider call was made.")
         print("  Retrieval scores above are complete and cost nothing.")
+        # Build the evidence identity here too. It needs no credential, makes
+        # no request and costs nothing, and it is the only thing standing
+        # between a configuration that cannot be recorded and the single moment
+        # that fault would otherwise surface: the paid confirmation prompt,
+        # with the spend already authorised and the allowance non-renewing.
+        # That is not hypothetical. On 14 September 2026 three out-of-range
+        # bounds reached exactly that point, because nothing free constructed
+        # this record. Since the spend ceilings left `AnswerConfiguration`,
+        # this is byte-identical to what the paid capture will record, so a
+        # clean rehearsal is now a real rehearsal of the identity.
+        config: dict[str, object] | None = None
+        try:
+            settings = Settings(retrieval_top_k=args.top_k)
+        except Exception:
+            # A half-configured credential environment must not break a free
+            # retrieval run: "a configured credential alone never triggers
+            # inference" cuts both ways, and this path has to work on any
+            # machine. Say the identity was not checked and carry on with the
+            # exit code retrieval earned. Settings validation errors quote the
+            # values they rejected and some are credentials, so never print it.
+            print("  identity: NOT checked -- settings did not construct here.")
+        else:
+            try:
+                config = _answer_configuration(settings, args.top_k)
+            except (TypeError, ValueError) as error:
+                # Settings constructed and the identity still cannot be built.
+                # That is the defect this path exists to catch, so it is fatal
+                # here rather than at the paid prompt. AnswerConfiguration is
+                # non-secret by construction, so unlike the branch above this
+                # one can say what is actually wrong -- the message that was
+                # missing when it mattered.
+                print(
+                    f"Answer configuration is not recordable evidence: {error}",
+                    file=sys.stderr,
+                )
+                return 2
+            print("  identity: built and validated; a capture records this.")
         if args.output:
             payload = args.captured_identity
+            if config is not None:
+                payload = {**payload, "config": config}
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return 1 if failures else 0
@@ -404,10 +443,6 @@ def _answer_configuration(settings: Settings, top_k: int) -> dict[str, object]:
             "complete_pair_required": True,
             "max_provider_request_bytes": 32000,
             "attempt_reservation_micro_usd": 40000,
-            "daily_attempt_limit": settings.daily_answer_limit,
-            "monthly_attempt_limit": settings.monthly_answer_limit,
-            "daily_budget_micro_usd": settings.daily_budget_micro_usd,
-            "monthly_budget_micro_usd": settings.monthly_budget_micro_usd,
             "shared_worker_limit": 1,
             "budget_storage": "persistent_local_sqlite",
         }

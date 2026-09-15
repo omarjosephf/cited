@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from assistant import capture as capture_module
 from assistant.answering import Answer, Answerer, Turn
 from assistant.budget import BudgetExhausted
-from assistant.capture import CaptureBudget, QualificationAllowance, capture_answers
+from assistant.capture import (
+    CaptureBudget,
+    QualificationAllowance,
+    capture_answers,
+    save_capture,
+)
 from assistant.evaluation import AnswerOutcome, AnswerReport, Question
 from assistant.persistent_budget import (
     BudgetLimits,
@@ -229,3 +237,83 @@ def test_allowance_bootstrap_refuses_a_ceiling_given_in_attempts(
         main()
 
     assert not path.exists()
+
+
+def test_a_locked_replace_is_retried_rather_than_ending_the_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 15 September 2026 failure, which cost 36 of 150 lifetime attempts.
+
+    Every provider call had succeeded. One refused `os.replace` at a checkpoint
+    write ended the run at question 37 of 75, and the allowance could not fund
+    the suite a second time. A momentary lock -- a sync client or scanner
+    holding the target -- must not cost a non-renewable allowance.
+    """
+    budget = capture_budget(tmp_path)
+    fake = ScriptedAnswerer()
+    output = tmp_path / "run.json"
+    real_replace = os.replace
+    refusals = {"count": 0}
+
+    def locked_once(source: Any, destination: Any) -> None:
+        if str(destination) == str(output) and refusals["count"] == 0:
+            refusals["count"] += 1
+            raise PermissionError(13, "locked by another process")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", locked_once)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    report = capture_answers(
+        cast(Answerer, fake),
+        [Question("A", True), Question("B", True)],
+        Settings.model_construct(),
+        budget,
+        output,
+        {},
+    )
+    assert refusals["count"] == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["capture_state"] == "complete"
+    assert payload["active_case"] is None
+    assert len(payload["raw_answering"]["outcomes"]) == 2
+    assert report.paid_calls == 2
+    assert not output.with_name(output.name + ".pending").exists()
+
+
+def test_a_pending_file_left_by_an_interrupted_replace_does_not_block_saving(
+    tmp_path: Path,
+) -> None:
+    """`.pending` is scratch, not evidence: the durable record is the output.
+
+    Refusing to overwrite it would turn one interrupted replacement into every
+    later save failing, which is the same allowance loss by a slower route.
+    """
+    output = tmp_path / "run.json"
+    save_capture(output, {"capture_state": "incomplete"}, first=True)
+    stale = output.with_name(output.name + ".pending")
+    stale.write_bytes(b"{}")
+    save_capture(output, {"capture_state": "complete"})
+    assert json.loads(output.read_text(encoding="utf-8"))["capture_state"] == "complete"
+    assert not stale.exists()
+
+
+def test_a_lock_that_never_clears_still_fails_and_keeps_the_prior_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrying must not turn a real storage failure into silent data loss."""
+    output = tmp_path / "run.json"
+    save_capture(output, {"capture_state": "incomplete"}, first=True)
+    attempts = {"count": 0}
+
+    def always_locked(source: Any, destination: Any) -> None:
+        attempts["count"] += 1
+        raise PermissionError(13, "locked by another process")
+
+    monkeypatch.setattr(os, "replace", always_locked)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    with pytest.raises(PermissionError):
+        save_capture(output, {"capture_state": "complete"})
+    assert attempts["count"] > 1
+    assert attempts["count"] == capture_module.REPLACE_ATTEMPTS
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["capture_state"] == "incomplete"

@@ -143,6 +143,33 @@ class CaptureBudget:
         self.used += 1
 
 
+# A refused replacement is usually transient: a sync client, search indexer or
+# malware scanner holding the target for a moment is enough. The wait is
+# budgeted generously on purpose -- thirteen seconds of retries is a trade worth
+# making every time against an allowance that cannot be regained.
+REPLACE_ATTEMPTS = 8
+REPLACE_BACKOFF_SECONDS = 0.1
+
+
+def replace_when_unlocked(temporary: Path, path: Path) -> None:
+    """Retry a replacement the filesystem refused, then fail honestly.
+
+    On 15 September 2026 one failed `os.replace` at question 37 of 75 ended a
+    capture that had already spent 36 of a 150-attempt lifetime allowance, and
+    the allowance could not fund the suite again. Every provider call had
+    succeeded; only the checkpoint write failed, and the bare `except Exception`
+    in `cmd_eval` discarded which one. A momentary lock must not cost that.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_BACKOFF_SECONDS * 2**attempt)
+
+
 def save_capture(path: Path, payload: dict[str, Any], *, first: bool = False) -> None:
     """Exclusive creation, then durable replacement; never truncate prior evidence."""
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
@@ -153,11 +180,15 @@ def save_capture(path: Path, payload: dict[str, Any], *, first: bool = False) ->
             os.fsync(file.fileno())
     else:
         temporary = path.with_name(path.name + ".pending")
-        with temporary.open("xb") as file:
+        # Deliberately not exclusive creation. The durable record is `path`; a
+        # `.pending` left behind by an earlier interrupted replacement holds
+        # nothing the caller still needs, and refusing to overwrite it would
+        # turn one failed save into every later save failing too.
+        with temporary.open("wb") as file:
             file.write(encoded)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        replace_when_unlocked(temporary, path)
     if os.name == "posix":
         descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
